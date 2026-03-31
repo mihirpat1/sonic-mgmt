@@ -3,6 +3,10 @@ import pytest
 import logging
 import warnings
 
+pytestmark = [
+    pytest.mark.topology('ptp')
+]
+
 from .inventory.parser import TransceiverInventory
 
 from tests.common.platform.interface_utils import get_physical_port_indices
