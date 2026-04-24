@@ -77,7 +77,7 @@ tests/transceiver/
 ├── __init__.py
 ├── conftest.py                              # Top-level fixtures:
 │                                            #   - Session-scoped prerequisite fixtures (presence, gold FW, link-up)
-│                                            #     that call common/prerequisites.py and cache results
+│                                            #     that call common/prerequisites.py (run once per session)
 │                                            #   - Autouse per-test health check fixture that calls
 │                                            #     common/health_checks.py (PID, logs, core files)
 │

@@ -123,7 +123,7 @@ conftest.py (top-level)             common/prerequisites.py
 
 #### Session-Scoped Prerequisite Fixtures
 
-These fixtures run once per test session. They call the corresponding function in `common/prerequisites.py`, cache the result, and `pytest.skip()` all dependent tests if the check fails:
+These fixtures run once per test session. They call the corresponding function in `common/prerequisites.py` and `pytest.skip()` all dependent tests if the check fails. Subsequent consumers receive the same result automatically (pytest session-scoped fixture behavior):
 
 | Fixture | Calls | Purpose | Consumed by |
 |---------|-------|---------|-------------|

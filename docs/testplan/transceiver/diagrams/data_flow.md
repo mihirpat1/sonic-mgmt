@@ -117,7 +117,7 @@ sequenceDiagram
             PD->>V: Validate against deployment templates
             V-->>PD: Results
         end
-        CFF->>PRQ: Session fixtures call prerequisite checks (once, cached)
+        CFF->>PRQ: Session fixtures call prerequisite checks (once per session)
         PRQ-->>CFF: Results (skip category if failed)
         PD-->>TC: Run main category test cases
     end
