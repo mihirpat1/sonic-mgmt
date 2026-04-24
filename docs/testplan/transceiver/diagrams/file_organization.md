@@ -36,23 +36,23 @@ graph TD
     D[system.json] --> B
     E[physical_oir.json] --> B
     F[other category files...] --> B
-    
+
     B --> H[BASE_ATTRIBUTES]
     B --> I[EEPROM_ATTRIBUTES]
     B --> J[SYSTEM_ATTRIBUTES]
     B --> K[Other Category Attributes]
-    
+
     H --> G[port_attributes_dict]
     I --> G
     J --> G
     K --> G
-    
+
     G --> M{Validation Templates?}
     M -->|Yes| N[Validator]
     M -->|No| L[Test Cases]
     N --> L
     O[deployment_templates.json] --> N
-    
+
     style A fill:#e1f5fe
     style G fill:#f3e5f5
     style L fill:#e8f5e8

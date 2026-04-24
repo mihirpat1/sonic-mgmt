@@ -7,10 +7,10 @@ graph TB
     subgraph "Input Files"
         A[dut_info.json]
         B[eeprom.json]
-        C[system.json] 
+        C[system.json]
         D[Other category files...]
     end
-    
+
     subgraph "Framework Processing"
         E[AttributeManager]
         F[Port Expansion Processor]
@@ -18,7 +18,7 @@ graph TB
         H[Priority Resolver]
         I[Validator]
     end
-    
+
     subgraph "Output Structure"
         J[port_attributes_dict]
         K[BASE_ATTRIBUTES]
@@ -26,55 +26,55 @@ graph TB
         M[SYSTEM_ATTRIBUTES]
         N[Other Category Attributes]
     end
-    
+
     subgraph "Validation (Optional)"
         Q[Deployment Templates]
         R[AttributeCompletenessValidator]
     end
-    
+
     subgraph "Test Infrastructure"
         S[conftest.py Session Fixtures]
         T[common/prerequisites.py]
         U[common/health_checks.py]
     end
-    
+
     subgraph "Test Consumption"
         O[Test Cases]
         P[DUT Host Object]
     end
-    
+
     A --> E
     B --> E
     C --> E
     D --> E
-    
+
     E --> F
     F --> G
     G --> H
     H --> I
-    
+
     I --> K
     I --> L
     I --> M
     I --> N
-    
+
     K --> J
     L --> J
     M --> J
     N --> J
-    
+
     J --> R
     Q --> R
     R --> P
     P --> O
     J --> O
-    
+
     S --> T
     T --> P
     S --> U
     U --> P
     S -->|gates| O
-    
+
     style A fill:#e1f5fe
     style E fill:#f3e5f5
     style J fill:#e8f5e8
@@ -140,7 +140,7 @@ Input (dut_info.json):
 
 After Port Expansion:
 - Ethernet4: same attributes
-- Ethernet5: same attributes  
+- Ethernet5: same attributes
 - Ethernet6: same attributes
 ```
 
