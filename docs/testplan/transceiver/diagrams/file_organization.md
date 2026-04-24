@@ -20,7 +20,7 @@ ansible/files/transceiver/inventory/
 │   ├── dom.json                            # DOM test attributes
 │   ├── vdm.json                            # VDM test attributes
 │   ├── pm.json                             # PM test attributes
-│   └── port_config.json                    # Port configuration test attributes (speed, FEC)
+│   └── port_config.json                    # Port configuration test attributes
 │
 └── templates/                              # Validation templates (optional)
     └── deployment_templates.json           # Attribute completeness validation
@@ -222,7 +222,7 @@ tests/transceiver/
 │  health_checks.py         │  │  eeprom/conftest.py  — no prerequisite   │
 │  prerequisites.py         │  │                        gate (TC 1-2 own) │
 │  verification.py          │  │  dom/conftest.py     — requests presence,│
-│  verification.py          │  │                        gold_fw, links    │
+│                           │  │                        gold_fw, links    │
 │  state_management.py      │  │  system/conftest.py  — requests presence,│
 │  db_helpers.py            │  │                        gold_fw, links    │
 │  cli_helpers.py           │  │  cdb_fw/conftest.py  — requests presence │

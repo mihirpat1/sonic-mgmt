@@ -589,7 +589,7 @@ Multiple JSON files based on test category define the metadata and test-specific
 - `dom.json` (DOM)
 - `vdm.json` (VDM)
 - `pm.json` (PM)
-- `port_config.json` (Port configuration tests — speed and FEC validation in CONFIG_DB)
+- `port_config.json` (Port configuration tests)
 
 **Location:** `ansible/files/transceiver/inventory/attributes/` directory
 

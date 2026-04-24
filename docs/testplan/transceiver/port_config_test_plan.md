@@ -43,12 +43,16 @@ Before starting tests, verify the following system conditions:
    - No existing system errors in logs
 
 2. **Configuration Validation**
-   - `port_config.json` configuration file is properly formatted and accessible (if present; tests rely on `BASE_ATTRIBUTES` from `dut_info/<dut_hostname>.json` for the `speed_gbps` attribute)
+   - `dut_info/<dut_hostname>.json` is present and contains `speed_gbps` and `host_lane_mask` in `BASE_ATTRIBUTES` for all ports under test
+   - `port_config.json` is properly formatted and accessible if MTU or autoneg validation is desired; when absent, those test cases skip gracefully
    - All required attributes are defined for the ports under test
 
 ## Attributes
 
-Port configuration tests primarily rely on `speed_gbps` from `BASE_ATTRIBUTES` (populated from `dut_info/<dut_hostname>.json`) rather than a separate category JSON file. The `port_config.json` file may define timing or platform-level override attributes that affect test behaviour.
+Port configuration tests draw from two attribute sources:
+
+- **BASE_ATTRIBUTES** (from `dut_info/<dut_hostname>.json`): Provides `speed_gbps` and `host_lane_mask`, used by port admin/status, speed, FEC, DOM polling, and cross-layer speed/FEC consistency tests. These attributes are always present because `dut_info` is a mandatory input file.
+- **PORT_CONFIG_ATTRIBUTES** (from `port_config.json`): Provides `expected_mtu` and `expected_autoneg`, used by MTU validation, autoneg validation, and cross-layer autoneg consistency tests. When `port_config.json` is absent or an attribute is not defined for a port, the corresponding test cases skip that port gracefully.
 
 The following table summarizes the key attributes used in port configuration testing. This table serves as the authoritative reference for all attributes and must be updated whenever new attributes are introduced:
 
