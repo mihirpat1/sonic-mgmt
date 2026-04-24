@@ -97,50 +97,84 @@ The following configuration files must be present to enable comprehensive transc
 
 > 📁 **Example Files**: Examples of all configuration files described below are available in the [`examples/inventory/`](examples/inventory/) directory. Use these as templates when creating your own configuration files.
 
-### Test Category Prerequisite Tests
+### Cross-Category Prerequisite Tests and Health Checks
 
-Prerequisite tests provide early readiness validation before a category's main test cases execute. They run after attribute resolution and optional validation, serving as gating checks to verify basic functionality before proceeding with the full test suite for a test category.
+Prerequisite tests and health checks are implemented using **pytest fixtures** in `conftest.py` files and shared logic in the `common/` module. There is no external JSON file — all execution wiring is handled by pytest infrastructure.
 
-**File location:** `ansible/files/transceiver/inventory/prerequisites.json`
+#### Architecture
 
-**Structure:** Grouped by test category, with each entry specifying a test module and function:
-
-```json
-{
-  "eeprom": [
-    {
-      "name": "eeprom_readability",
-      "module": "tests/transceiver/eeprom/test_eeprom_basic.py",
-      "function": "test_eeprom_pages"
-    }
-  ],
-  "dom": [
-    {
-      "name": "dom_basic",
-      "module": "tests/transceiver/dom/test_dom_basic.py",
-      "function": "test_dom_read"
-    }
-  ]
-}
+```text
+conftest.py (top-level)             common/prerequisites.py
+┌─────────────────────────┐         ┌──────────────────────────────┐
+│ @fixture(scope=session) │ calls   │ check_presence()             │
+│ presence_verified  ─────┼────────►│ check_gold_firmware()        │
+│ gold_fw_verified   ─────┼────────►│ check_links_up()             │
+│ links_verified     ─────┼────────►│ check_lldp()                 │
+└─────────────────────────┘         └──────────────────────────────┘
+          │ provides fixtures to               ▲
+          ▼                                    │ also called by
+┌─────────────────────────┐         ┌──────────────────────────────┐
+│ Category conftest.py    │         │ Reportable test cases        │
+│ dom/conftest.py         │         │ eeprom/test_presence.py      │
+│   requests presence,    │         │ cdb_fw/test_fw_upgrade.py    │
+│   gold_fw, links        │         │ system/.../test_link_*.py    │
+└─────────────────────────┘         └──────────────────────────────┘
 ```
 
-**Execution behavior:**
+#### Session-Scoped Prerequisite Fixtures
 
-1. Run immediately before each category's main tests (after attribute resolution and optional validation)
-2. Only the current category's list is loaded and executed; other categories' lists are deferred
-3. Execution order within each category array is preserved
-4. Duplicate tests (same module+function) are executed only once per category
-5. If the file or category key is absent, no prerequisites run for that category
+These fixtures run once per test session. They call the corresponding function in `common/prerequisites.py`, cache the result, and `pytest.skip()` all dependent tests if the check fails:
 
-**Common prerequisite test examples:**
+| Fixture | Calls | Purpose | Consumed by |
+|---------|-------|---------|-------------|
+| `presence_verified` | `check_presence()` | Verify all transceivers in `port_attributes_dict` are detected as Present | DOM, System, CDB FW |
+| `gold_fw_verified` | `check_gold_firmware()` | Verify active firmware is gold for non-DAC CMIS transceivers | DOM, System |
+| `links_verified` | `check_links_up()` + `check_lldp()` | Verify all ports are operationally up and LLDP neighbors are discovered | DOM, System |
 
-- Verify transceiver presence on the port
-- Verify port speed in CONFIG_DB matches expected speed per dut_info.json
-- Ensure RS FEC is configured if applicable
-- Validate active firmware version matches the expected gold firmware
-- Confirm I2C communication functionality via `sfputil`
-- Verify link operational status (link-up state)
-- Ensure critical system processes (`xcvrd`, `pmon`, `syncd`, `orchagent`) are running
+Each category's `conftest.py` requests the fixtures it depends on via an `autouse=True` fixture:
+
+- **EEPROM**: No prerequisite gate — TC 1-2 own the presence check as reportable test cases
+- **DOM**: Requests `presence_verified`, `gold_fw_verified`, `links_verified`
+- **System**: Requests `presence_verified`, `gold_fw_verified`, `links_verified`
+- **CDB FW Upgrade**: Requests `presence_verified`
+- **Port Config**: No prerequisite gate — tests are read-only DB queries
+
+#### Per-Test Health Check Fixture
+
+An `autouse=True` function-scoped fixture in the top-level `conftest.py` runs before and after every test case using a `yield` pattern. It calls `common/health_checks.py` to:
+
+**Before** (setup):
+
+- Record xcvrd PID baseline (EEPROM, DOM) or all service PIDs (System)
+- Record current log position for post-test isolation
+- Record `/var/core/` file list for core file detection
+
+**After** (teardown):
+
+- Verify PID unchanged (or intentionally changed for service restart tests)
+- Scan logs from baseline for unexpected errors
+- Check for new core files
+
+Subcategory-level `conftest.py` files can override the health check fixture to accommodate intentional disruptions (e.g., `system/process_restart/conftest.py` expects PID changes; `system/recovery/conftest.py` re-establishes baselines after reboot).
+
+#### Dual-Use Design: Reportable Tests and Session Gates
+
+The same check logic in `common/prerequisites.py` serves two roles:
+
+1. **Reportable test case**: A test file (e.g., `eeprom/test_presence.py`) calls `check_presence()` and asserts. This produces a pass/fail result in the test report.
+2. **Session fixture gate**: The `presence_verified` fixture in `conftest.py` calls the same `check_presence()`. If it fails, all downstream tests that depend on this fixture are skipped with a clear message.
+
+This avoids duplicating logic while ensuring both test-level reporting and cross-category gating.
+
+#### Common Prerequisite Checks
+
+The following checks are available in `common/prerequisites.py`:
+
+- Verify transceiver presence on all expected ports
+- Validate active firmware version matches expected gold firmware (non-DAC CMIS)
+- Verify link operational status (link-up state) for all ports
+- Verify LLDP neighbor discovery (if enabled)
+- Verify critical system services are running (xcvrd, pmon, swss, syncd)
 
 ### DUT Info Files
 
@@ -555,6 +589,7 @@ Multiple JSON files based on test category define the metadata and test-specific
 - `dom.json` (DOM)
 - `vdm.json` (VDM)
 - `pm.json` (PM)
+- `port_config.json` (Port configuration tests — speed and FEC validation in CONFIG_DB)
 
 **Location:** `ansible/files/transceiver/inventory/attributes/` directory
 
@@ -913,16 +948,17 @@ The following child test plans provide comprehensive, attribute-driven test case
 
 | Test Plan | Description |
 |-----------|-------------|
-| [EEPROM Test Plan](eeprom_test_plan.md) | EEPROM field validation, firmware version checks, hexdump verification, breakout serial number patterns, port speed and FEC configuration validation |
+| [EEPROM Test Plan](eeprom_test_plan.md) | EEPROM field validation, firmware version checks, hexdump verification, and breakout serial number pattern validation |
 | [DOM Test Plan](dom_test_plan.md) | Digital Optical Monitoring sensor validation, operational and threshold range checks, data consistency, polling control, and interface state change impact on DOM data |
 | [System Test Plan](system_test_plan.md) | System-level transceiver testing including link behavior, process/service restarts, reboot recovery, transceiver event handling (reset, low power mode, loopback), SI settings, C-CMIS tuning, and stress tests |
+| [Port Configuration Test Plan](port_config_test_plan.md) | Validation of per-port speed and FEC configuration in CONFIG_DB against expected values from BASE_ATTRIBUTES |
 
 ### Document Relationships
 
 This repository uses three types of test documentation:
 
 - **This document (Infrastructure & Framework)**: Defines configuration file formats, attribute resolution, normalization rules, validation templates, and shared CLI reference. All other test plans reference this document for infrastructure details.
-- **Child attribute plans** (EEPROM, DOM, System, VDM, PM, CMIS Firmware upgrade, Transceiver OIR): Define *what* to validate per test category — specific attributes, expected values, and category-scoped test cases.
+- **Child attribute plans** (EEPROM, DOM, System, Port Config, VDM, PM, CMIS Firmware upgrade, Transceiver OIR): Define *what* to validate per test category — specific attributes, expected values, and category-scoped test cases.
 - **Scenario test plan** (future): Will define *how* to exercise the system — end-to-end test sequences (shut/noshut, reboot, failure injection) that compose and orchestrate tests from the per-category child plans above for scenario-driven validation.
 
 ### 1. Tests not involving traffic

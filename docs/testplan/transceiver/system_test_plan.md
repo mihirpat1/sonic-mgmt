@@ -114,7 +114,7 @@ For detailed CLI commands used in the test cases below, please refer to the [CLI
 
 **Test Execution Prerequisites:**
 
-The following tests from the [Transceiver Onboarding Test Infrastructure and Framework](test_plan.md#test-cases-interim) will be run prior to executing the system tests:
+The following tests from the [Transceiver Onboarding Test Infrastructure and Framework](test_plan.md#cross-category-prerequisite-tests-and-health-checks) will be run prior to executing the system tests:
 
 - Transceiver presence check
 - Ensure active firmware is gold firmware (for non-DAC CMIS transceivers)
@@ -203,9 +203,29 @@ This procedure ensures tests don't interfere with each other:
    - Verify all ports return to their original operational states
    - Execute **Standard Port Recovery and Verification Procedure** for affected ports
 
+### Common Test Setup and Teardown
+
+The following setup and teardown steps apply to **all test cases** in this plan, complementing the **State Preservation and Restoration** and **Standard Port Recovery and Verification Procedure** defined above.
+
+#### Common Setup (before each test case)
+
+1. **Link status baseline**: Verify all ports in `port_attributes_dict` are operationally up. Record `last_up_time` and link flap count per port.
+2. **Service PID baseline**: Record PIDs of xcvrd, pmon, swss, and syncd for post-test comparison.
+3. **Core file baseline**: Record the list of existing files in `/var/core/` before the test begins.
+4. **Log baseline**: Record the current position in system and kernel logs so post-test inspection can isolate entries introduced by the test.
+
+#### Common Teardown (after each test case)
+
+1. **xcvrd health**: Verify xcvrd PID matches the baseline (or has restarted as intentionally expected for service/reboot tests). Any unintended PID change must be investigated before proceeding.
+2. **Core file audit**: Compare `/var/core/` against the baseline to detect any new core files created during the test.
+3. **Log inspection**: Scan system and kernel logs from the baseline position for unexpected errors not attributable to the test's intentional disruption.
+4. **Link recovery**: If the test left any port in a non-operational state (e.g., due to mid-test failure), execute **Standard Port Recovery and Verification Procedure** for affected ports before proceeding to the next test.
+
 ### Link Behavior Test Cases
 
 The following tests aim to validate the link status and stability of transceivers under various conditions.
+
+**Subcategory setup/teardown**: Disruptive — modifies port operational state. No additional setup beyond [Common Test Setup and Teardown](#common-test-setup-and-teardown). Additional teardown: if a test fails while a port is in shutdown state (e.g., failure in TC 1 before the startup command is issued), issue `config interface startup <port>` before proceeding to the next test case.
 
 | TC No. | Test | Steps | Expected Results |
 |------|------|------|------------------|
@@ -213,6 +233,8 @@ The following tests aim to validate the link status and stability of transceiver
 | 2 | Port startup validation | 1. For each transceiver port individually:<br>   a. Issue `config interface startup <port>`.<br>   b. Wait for `port_startup_wait_sec`.<br>2. Execute **Standard Port Recovery and Verification Procedure**. | Ensure that the port passes all verification checks including link status, LLDP, CMIS states, SI settings, and application code validation. |
 
 ### Process and Service Restart Test Cases
+
+**Subcategory setup/teardown**: Disruptive — intentionally restarts services or daemons. Note: the common teardown PID check does not flag PID changes in this subcategory since service restarts are the subject of the test; instead, verify that each restarted service comes back up and is running before the test is considered complete. Additional teardown: if a service fails to restart or remains down after the test, manually restart it (e.g., `sudo systemctl restart pmon`) before proceeding to the next test case.
 
 | TC No. | Test | Steps | Expected Results |
 |------|------|------|------------------|
@@ -225,6 +247,8 @@ The following tests aim to validate the link status and stability of transceiver
 
 ### System Recovery Test Cases
 
+**Subcategory setup/teardown**: Highly disruptive — reboots or power-cycles the entire system. No additional setup or teardown beyond [Common Test Setup and Teardown](#common-test-setup-and-teardown); the **Standard Port Recovery and Verification Procedure** executed after each reboot is sufficient to confirm system health. Note: PID and log baselines are invalidated by a reboot; re-establish them after each reboot before proceeding to the next test.
+
 | TC No. | Test | Steps | Expected Results |
 |------|------|------|------------------|
 | 1 | Config reload impact | 1. Verify current link states to be up for all transceivers.<br>2. Execute `sudo config reload -y`.<br>3. Wait for `config_reload_settle_sec` and verify transceiver link restoration.<br>4. Execute **Standard Port Recovery and Verification Procedure** for all ports. | Ensure `xcvrd` restarts and all ports pass comprehensive verification checks. |
@@ -235,6 +259,8 @@ The following tests aim to validate the link status and stability of transceiver
 
 ### Transceiver Event Handling Test Cases
 
+**Subcategory setup/teardown**: Disruptive — modifies transceiver physical state (reset, low power mode, Tx disable). **State Preservation and Restoration** (capture phase) is required before every test, and the restoration phase must execute regardless of pass/fail. Additional failure-path teardown: if a test fails while the transceiver is in low power mode, issue the appropriate high-power restore command before proceeding; if the interface is in shutdown state, issue `config interface startup <port>`; if `pmon_daemon_control.json` was modified (TC 3), revert it and restart pmon before proceeding.
+
 | TC No. | Test | Steps | Expected Results |
 |------|------|------|------------------|
 | 1 | Transceiver reset validation | 1. Skip test if `transceiver_reset_supported` is False.<br>2. Execute **State Preservation and Restoration** (capture phase).<br>3. Reset the transceiver using appropriate CLI command.<br>4. Wait for `transceiver_reset_i2c_recover_sec` to allow I2C recovery.<br>5. Verify port is linked down after reset and transceiver is in low power mode (if `low_power_mode_supported` is True).<br>6. If `low_pwr_request_hw_asserted` is True:<br>   a. Check DataPath is in DPDeactivated state.<br>   b. Verify LowPwrAllowRequestHW (page 0h, byte 26.6) is set to 1.<br>7. Issue `config interface shutdown <port>` and wait for `port_shutdown_wait_sec`.<br>8. Issue `config interface startup <port>` and wait for `port_startup_wait_sec`.<br>9. Execute **Standard Port Recovery and Verification Procedure**.<br>10. Execute **State Preservation and Restoration** (restoration phase). | Ensure that the port is linked down after reset and is in low power mode (if transceiver supports it). If `low_pwr_request_hw_asserted` is True, verify DataPath is in DPDeactivated state and LowPwrAllowRequestHW signal is asserted (set to 1). The shutdown and startup commands should re-initialize the port and bring the link up with all verification checks passing. |
@@ -244,6 +270,8 @@ The following tests aim to validate the link status and stability of transceiver
 
 ### Diagnostic Test Cases
 
+**Subcategory setup/teardown**: TC 1 (loopback) is semi-disruptive; TC 2–3 (SI settings) are read-only. **State Preservation and Restoration** is used in TC 1. Additional failure-path teardown for TC 1: if the test fails while a loopback mode is active, disable all loopback modes using the appropriate CLI command before proceeding to the next test case.
+
 | TC No. | Test | Steps | Expected Results |
 |------|------|------|------------------|
 | 1 | Transceiver loopback validation | 1. Skip test if `loopback_supported` is False or `supported_loopback_modes` is empty.<br>2. Execute **State Preservation and Restoration** (capture phase).<br>3. For each loopback mode in `supported_loopback_modes`:<br>   a. Enable the loopback mode using CLI command.<br>   b. Wait for `loopback_settle_sec`.<br>   c. Verify loopback is active through CLI.<br>   d. Test data path functionality (use LLDP neighbor verification for host-side input loopback if applicable).<br>   e. Disable loopback mode.<br>   f. Wait for `loopback_settle_sec`.<br>   g. Verify normal operation is restored.<br>4. Execute **Standard Port Recovery and Verification Procedure**.<br>5. Execute **State Preservation and Restoration** (restoration phase). | Ensure that the various supported types of loopback work on the transceiver. The LLDP neighbor can also be used to verify the data path after enabling loopback (such as host-side input loopback). All comprehensive verification checks should pass. |
@@ -252,12 +280,16 @@ The following tests aim to validate the link status and stability of transceiver
 
 ### Configuration Validation Test Cases
 
+**Subcategory setup/teardown**: Semi-disruptive — modifies C-CMIS frequency or tx power settings. **State Preservation and Restoration** (capture phase) is required before every test, and the restoration phase must execute regardless of pass/fail. Additional failure-path teardown: if a test fails before restoring original settings, manually apply the default value (first entry in `frequency_values` or `tx_power_values`) using the appropriate `config interface transceiver` command before proceeding to the next test case.
+
 | TC No. | Test | Steps | Expected Results |
 |------|------|------|------------------|
 | 1 | C-CMIS frequency adjustment validation | 1. Skip test if `frequency_values` is empty or not defined.<br>2. Execute **State Preservation and Restoration** (capture phase).<br>3. Capture current frequency configuration from CONFIG_DB and STATE_DB.<br>4. For each frequency value in `frequency_values` (starting from index 1, skipping default):<br>   a. Apply frequency using `config interface transceiver frequency <port> <frequency>`.<br>   b. Wait for `port_startup_wait_sec`.<br>   c. Verify frequency is set correctly in CONFIG_DB and STATE_DB.<br>   d. Execute **Standard Port Recovery and Verification Procedure**.<br>5. Restore original frequency (first value in `frequency_values`).<br>6. Wait for `port_startup_wait_sec` and verify restoration.<br>7. Execute **Standard Port Recovery and Verification Procedure**.<br>8. Execute **State Preservation and Restoration** (restoration phase). | Ensure C-CMIS transceiver frequency can be adjusted to supported values and restored to original frequency. Port should remain stable throughout frequency changes with all verification checks passing. |
 | 2 | C-CMIS tx power adjustment validation | 1. Skip test if `tx_power_values` is empty or not defined.<br>2. Execute **State Preservation and Restoration** (capture phase).<br>3. Capture current tx power configuration from CONFIG_DB and STATE_DB.<br>4. For each tx power value in `tx_power_values` (starting from index 1, skipping default):<br>   a. Apply tx power using `config interface transceiver tx-power <port> <tx_power>`.<br>   b. Wait for `port_startup_wait_sec`.<br>   c. Verify tx power is set correctly in CONFIG_DB and STATE_DB.<br>   d. Execute **Standard Port Recovery and Verification Procedure**.<br>5. Restore original tx power (first value in `tx_power_values`).<br>6. Wait for `port_startup_wait_sec` and verify restoration.<br>7. Execute **Standard Port Recovery and Verification Procedure**.<br>8. Execute **State Preservation and Restoration** (restoration phase). | Ensure C-CMIS transceiver tx power can be adjusted to supported values and restored to original tx power. Port should remain stable throughout power changes with all verification checks passing. |
 
 ### Stress and Load Test Cases
+
+**Subcategory setup/teardown**: Highly disruptive — repeated port toggles, reboots, or concurrent operations over many iterations. **State Preservation and Restoration** is used in most tests. Additional setup: record initial link flap counts per port before the stress loop begins. Additional teardown: after each iteration (not just at the end), verify no unexpected core files were created and no unintended I2C errors accumulated in kernel logs; if cumulative errors are observed, pause and investigate before continuing to the next iteration to prevent cascading failures.
 
 | TC No. | Test | Steps | Expected Results |
 |------|------|------|------------------|
@@ -271,20 +303,23 @@ The following tests aim to validate the link status and stability of transceiver
 
 ## Cleanup and Post-Test Verification
 
-After test completion:
+The following steps are performed once after **all test cases** in this plan have completed. Per-test teardown (xcvrd PID check, log scan, core file check, link recovery) already covers ongoing health monitoring throughout the run.
 
-### Immediate Cleanup
+### State Restoration
 
-1. **State Restoration**: Verify all transceivers are restored to their original operational state
-2. **Link Status**: Verify all transceivers are in operational state with links up
-3. **Configuration Reset**: Ensure any temporary configuration changes (e.g., pmon_daemon_control.json modifications) are reverted
-4. **System Health**: Check system logs for any unexpected errors or warnings introduced during testing
-5. **Service Status**: Verify all services and daemons are running normally
-6. **Database Consistency**: Verify state databases contain expected transceiver information and are consistent
+1. **Interface state**: Confirm all ports in `port_attributes_dict` are operationally up. If any port remains in shutdown state (e.g., due to mid-test failure), issue `config interface startup <port>`.
+2. **Transceiver state**: Confirm all transceivers are in high power mode with DataPath in DPActivated state. If any transceiver remains in low power mode or a non-operational DataPath state, restore using the appropriate CLI command.
+3. **Configuration files**: Ensure any temporary configuration changes (e.g., `pmon_daemon_control.json` modifications from Transceiver Event Handling TC 3) have been reverted to their original state.
+4. **C-CMIS settings**: Confirm frequency and tx power values are restored to their defaults (first entry in `frequency_values` and `tx_power_values` respectively) for all ports tested by Configuration Validation test cases.
+
+### Post-Session Checks
+
+1. **Database consistency**: Verify STATE_DB contains expected transceiver information (TRANSCEIVER_INFO, TRANSCEIVER_DOM_SENSOR populated) for all ports in `port_attributes_dict`. This is a session-level check not covered by per-test teardown.
+2. **Link stability and LLDP**: Confirm all ports are operationally up and LLDP neighbors are discovered (if LLDP is enabled), as a final end-to-end confirmation after the full disruptive test sequence.
 
 ### Post-Test Report Generation
 
-1. **Test Summary**: Generate comprehensive test results including pass/fail status for each test case
-2. **Performance Metrics**: Document settle times, iteration counts, and any performance deviations
-3. **Error Analysis**: Compile any errors or warnings encountered during testing with recommended remediation
-4. **System State**: Document final system state and any persistent configuration changes
+1. **Test Summary**: Generate comprehensive test results including pass/fail status for each test case across all subcategories.
+2. **Settle Time Analysis**: Document actual settle times observed (link-up, service restart, reboot) vs. configured attributes for regression comparison.
+3. **Stress Test Metrics**: For stress subcategory tests, report per-iteration pass/fail, cumulative link flap counts (intentional vs. unexpected), and any core files created during the stress loops.
+4. **Error Analysis**: Compile all errors and warnings encountered during testing with context (which test case, which port, which iteration) and recommended remediation.

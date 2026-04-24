@@ -9,7 +9,6 @@ graph TB
         B[eeprom.json]
         C[system.json] 
         D[Other category files...]
-    X[(prerequisites.json)]
     end
     
     subgraph "Framework Processing"
@@ -33,6 +32,12 @@ graph TB
         R[AttributeCompletenessValidator]
     end
     
+    subgraph "Test Infrastructure"
+        S[conftest.py Session Fixtures]
+        T[common/prerequisites.py]
+        U[common/health_checks.py]
+    end
+    
     subgraph "Test Consumption"
         O[Test Cases]
         P[DUT Host Object]
@@ -42,8 +47,6 @@ graph TB
     B --> E
     C --> E
     D --> E
-    X --> T[Prerequisite Test Runner]
-    T --> O
     
     E --> F
     F --> G
@@ -66,10 +69,17 @@ graph TB
     P --> O
     J --> O
     
+    S --> T
+    T --> P
+    S --> U
+    U --> P
+    S -->|gates| O
+    
     style A fill:#e1f5fe
     style E fill:#f3e5f5
     style J fill:#e8f5e8
     style O fill:#fff3e0
+    style S fill:#fce4ec
 ```
 
 ## Detailed Processing Flow
@@ -85,7 +95,8 @@ sequenceDiagram
     participant PD as port_attributes_dict
     participant V as Validator
     participant TC as Test Cases
-    participant PRQ as Prerequisites File
+    participant CFF as conftest.py Fixtures
+    participant PRQ as common/prerequisites.py
 
     TC->>AM: Initialize framework & load base data
     AM->>DI: Load dut_info.json
@@ -106,9 +117,8 @@ sequenceDiagram
             PD->>V: Validate against deployment templates
             V-->>PD: Results
         end
-        TC->>PRQ: Load category prerequisite list (if present)
-        PRQ->>PRQ: Execute prerequisite tests (gating checks)
-        PRQ-->>TC: Continue if all pass
+        CFF->>PRQ: Session fixtures call prerequisite checks (once, cached)
+        PRQ-->>CFF: Results (skip category if failed)
         PD-->>TC: Run main category test cases
     end
 ```
