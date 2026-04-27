@@ -99,82 +99,50 @@ The following configuration files must be present to enable comprehensive transc
 
 ### Cross-Category Prerequisite Tests and Health Checks
 
-Prerequisite tests and health checks are implemented using **pytest fixtures** in `conftest.py` files and shared logic in the `common/` module. There is no external JSON file — all execution wiring is handled by pytest infrastructure.
+The following common prerequisite tests and per-test health checks are shared across all test categories. Each child test plan references this section and only documents category-specific additions.
 
-#### Architecture
+#### Common Session-Level Prerequisites
 
-```text
-conftest.py (top-level)             common/prerequisites.py
-┌─────────────────────────┐         ┌──────────────────────────────┐
-│ @fixture(scope=session) │ calls   │ check_presence()             │
-│ presence_verified  ─────┼────────►│ check_gold_firmware()        │
-│ gold_fw_verified   ─────┼────────►│ check_links_up()             │
-│ links_verified     ─────┼────────►│ check_lldp()                 │
-└─────────────────────────┘         └──────────────────────────────┘
-          │ provides fixtures to               ▲
-          ▼                                    │ also called by
-┌─────────────────────────┐         ┌──────────────────────────────┐
-│ Category conftest.py    │         │ Reportable test cases        │
-│ dom/conftest.py         │         │ eeprom/test_presence.py      │
-│   requests presence,    │         │ cdb_fw/test_fw_upgrade.py    │
-│   gold_fw, links        │         │ system/.../test_link_*.py    │
-└─────────────────────────┘         └──────────────────────────────┘
-```
+Each gate is a session-scoped pytest fixture defined in [`tests/transceiver/conftest.py`](../../../tests/transceiver/conftest.py) that wraps a check primitive in [`tests/transceiver/common/prerequisites.py`](../../../tests/transceiver/common/prerequisites.py). The check runs **once per session**; on failure the fixture calls `pytest.skip(...)` so every dependent test is skipped with a clear reason. Categories opt in by requesting the fixture from their own `conftest.py` (the gate is not autouse).
 
-#### Session-Scoped Prerequisite Fixtures
+**Available gates**
 
-These fixtures run once per test session. They call the corresponding function in `common/prerequisites.py` and `pytest.skip()` all dependent tests if the check fails. Subsequent consumers receive the same result automatically (pytest session-scoped fixture behavior):
+| Fixture | Check | Description |
+|---------|-------|-------------|
+| `presence_verified` | `check_presence_show_cli` | All transceivers in `port_attributes_dict` are detected as Present |
+| `gold_fw_verified` | `check_gold_firmware` | Active firmware matches the expected gold firmware for non-DAC CMIS transceivers |
+| `links_verified` | `check_links_up` | Every transceiver port in `port_attributes_dict` is both admin-up and oper-up |
 
-| Fixture | Calls | Purpose | Consumed by |
-|---------|-------|---------|-------------|
-| `presence_verified` | `check_presence()` | Verify all transceivers in `port_attributes_dict` are detected as Present | DOM, System, CDB FW |
-| `gold_fw_verified` | `check_gold_firmware()` | Verify active firmware is gold for non-DAC CMIS transceivers | DOM, System |
-| `links_verified` | `check_links_up()` + `check_lldp()` | Verify all ports are operationally up and LLDP neighbors are discovered | DOM, System |
+**Opt-in by category**
 
-Each category's `conftest.py` requests the fixtures it depends on via an `autouse=True` fixture:
+| Category | `presence_verified` | `gold_fw_verified` | `links_verified` |
+|----------|:-------------------:|:------------------:|:----------------:|
+| EEPROM       | — own reportable test | — own reportable test | ✅ |
+| DOM          | ✅ | ✅ | ✅ |
+| System       | ✅ | ✅ | ✅ |
+| CDB FW       | ✅ | — own reportable test | ✅ |
+| Port Config  | — CONFIG_DB only | — CONFIG_DB only | — CONFIG_DB only |
+| Physical OIR / Remote Reseat | ✅ | ✅ | ✅ (verified pre-test only) |
 
-- **EEPROM**: No prerequisite gate — TC 1-2 own the presence check as reportable test cases
-- **DOM**: Requests `presence_verified`, `gold_fw_verified`, `links_verified`
-- **System**: Requests `presence_verified`, `gold_fw_verified`, `links_verified`
-- **CDB FW Upgrade**: Requests `presence_verified`
-- **Port Config**: No prerequisite gate — tests are read-only DB queries
+A "—" entry means the category intentionally does not consume that gate; the trailing note explains why. EEPROM and CDB FW skip the gates whose semantics they own as reportable tests (so a gold-FW mismatch surfaces as a CDB FW test failure, not a session-wide skip).
 
-#### Per-Test Health Check Fixture
+#### Common Per-Test Health Checks
 
-An `autouse=True` function-scoped fixture in the top-level `conftest.py` runs before and after every test case using a `yield` pattern. It calls `common/health_checks.py` to:
+An autouse fixture in the top-level `conftest.py` runs before and after **every** transceiver test:
 
-**Before** (setup):
+- **Before**: record `xcvrd` PID and `/var/core/` baseline; **skip** the test if `xcvrd` is not running.
+- **After**: verify `xcvrd` PID is unchanged and no new core files appeared; on failure, **abort the session** (`pytest.exit`) to avoid running further tests against a degraded DUT.
 
-- Record xcvrd PID baseline (EEPROM, DOM) or all service PIDs (System)
-- Record current log position for post-test isolation
-- Record `/var/core/` file list for core file detection
+| Phase     | Action on failure           | Effect on the run                                                                |
+| --------- | --------------------------- | -------------------------------------------------------------------------------- |
+| Pre-test  | `pytest.skip()`             | Current test is skipped; remaining tests continue.                               |
+| Post-test | `pytest.exit(returncode=1)` | Session aborts on the first post-test failure to surface the regression cleanly. |
 
-**After** (teardown):
+Both phases append to a shared `health_check_events` list; a `pytest_terminal_summary` hook prints a consolidated `Health Check Summary` section at the end of the run.
 
-- Verify PID unchanged (or intentionally changed for service restart tests)
-- Scan logs from baseline for unexpected errors
-- Check for new core files
+The transceiver `conftest.py` also tags every collected item (and its parent `Module`) with `pytest.mark.skip_check_dut_health` to suppress the repo-wide module-scoped `core_dump_and_config_check` fixture, which would otherwise duplicate the per-test work above.
 
-Subcategory-level `conftest.py` files can override the health check fixture to accommodate intentional disruptions (e.g., `system/process_restart/conftest.py` expects PID changes; `system/recovery/conftest.py` re-establishes baselines after reboot).
-
-#### Dual-Use Design: Reportable Tests and Session Gates
-
-The same check logic in `common/prerequisites.py` serves two roles:
-
-1. **Reportable test case**: A test file (e.g., `eeprom/test_presence.py`) calls `check_presence()` and asserts. This produces a pass/fail result in the test report.
-2. **Session fixture gate**: The `presence_verified` fixture in `conftest.py` calls the same `check_presence()`. If it fails, all downstream tests that depend on this fixture are skipped with a clear message.
-
-This avoids duplicating logic while ensuring both test-level reporting and cross-category gating.
-
-#### Common Prerequisite Checks
-
-The following checks are available in `common/prerequisites.py`:
-
-- Verify transceiver presence on all expected ports
-- Validate active firmware version matches expected gold firmware (non-DAC CMIS)
-- Verify link operational status (link-up state) for all ports
-- Verify LLDP neighbor discovery (if enabled)
-- Verify critical system services are running (xcvrd, pmon, swss, syncd)
+For implementation details (module layout, `run_pre_check` / `run_post_check` helpers, category fixture examples, and how categories add their own pre/post checks while reusing the shared event log), see the source: [`tests/transceiver/conftest.py`](../../../tests/transceiver/conftest.py), [`tests/transceiver/common/prerequisites.py`](../../../tests/transceiver/common/prerequisites.py), and [`tests/transceiver/common/health_checks.py`](../../../tests/transceiver/common/health_checks.py).
 
 ### DUT Info Files
 
@@ -699,7 +667,7 @@ Example `eeprom.json` file:
 
 ```json
 {
-  "mandatory": ["vendor_name", "normalized_vendor_name", "dual_bank_supported"],
+  "mandatory": ["vendor_name", "normalized_vendor_name"],
   "defaults": {
     "vdm_supported": false,
     "cdb_backgroundmode_supported": false,
@@ -708,8 +676,7 @@ Example `eeprom.json` file:
   "transceivers": {
     "deployment_configurations": {
       "2x100G_200G_SIDE": {
-        "vdm_supported": true,
-        "dual_bank_supported": true
+        "vdm_supported": true
       }
     },
     "vendors": {
@@ -718,10 +685,9 @@ Example `eeprom.json` file:
         "part_numbers": {
           "NORMALIZED_VENDOR_PN_ABC": {
             "vendor_name": "Vendor A",
-            "dual_bank_supported": true,
             "platform_hwsku_overrides": {
               "PLATFORM_ABC+VENDOR_HWSKU_ABC": {
-                "sfputil_eeprom_dump_time": 5
+                "eeprom_dump_timeout_sec": 5
               }
             }
           }
@@ -814,7 +780,7 @@ The `port_attributes_dict` is provided directly as a session-scoped fixture and 
 def test_example(port_attributes_dict):
     # Access EEPROM attributes
     eeprom_attrs = port_attributes_dict["Ethernet0"].get("EEPROM_ATTRIBUTES", {})
-    dual_bank_supported = eeprom_attrs.get("dual_bank_supported")
+    vdm_supported = eeprom_attrs.get("vdm_supported")
 
     # Access base transceiver configuration (parsed from transceiver_configuration)
     base_attrs = port_attributes_dict["Ethernet0"]["BASE_ATTRIBUTES"]
@@ -844,7 +810,7 @@ Optional post-processing validation ensures comprehensive attribute coverage for
     "2x100G_200G_SIDE": {
       "required_attributes": {
         "BASE_ATTRIBUTES": ["vendor_name", "vendor_pn", "cable_type", "speed_gbps", "deployment"],
-        "EEPROM_ATTRIBUTES": ["dual_bank_supported", "vdm_supported"],
+        "EEPROM_ATTRIBUTES": ["vdm_supported"],
         "DOM_ATTRIBUTES": ["temperature", "voltage", "tx_power", "alarm_flags"]
       },
       "optional_attributes": {

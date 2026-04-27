@@ -1,6 +1,12 @@
 import logging
 import pytest
 from tests.transceiver.utils.cli_parser_helper import parse_eeprom
+from tests.transceiver.attribute_parser.attribute_keys import (
+    BASE_ATTRIBUTES_KEY,
+    CDB_FW_UPGRADE_ATTRIBUTES_KEY,
+    EEPROM_ATTRIBUTES_KEY,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -54,15 +60,18 @@ def test_eeprom_content_verification_via_show_cli(duthost, port_attributes_dict)
             all_failures.append(f"{port}: transceiver not detected (no CLI output)")
             continue
 
-        base_attrs = port_attrs.get("BASE_ATTRIBUTES", {})
-        eeprom_attrs = port_attrs.get("EEPROM_ATTRIBUTES", {})
+        base_attrs = port_attrs.get(BASE_ATTRIBUTES_KEY, {})
+        eeprom_attrs = port_attrs.get(EEPROM_ATTRIBUTES_KEY, {})
+        cmis_fw_attrs = port_attrs.get(CDB_FW_UPGRADE_ATTRIBUTES_KEY, {})
 
         field_failures = []
         for cli_key, attr_key in EEPROM_EXPECTED_CLI_KEY_TO_TRANSCEIVER_INV_KEY_MAPPING.items():
             if attr_key in base_attrs:
                 expected_value = base_attrs.get(attr_key)
-            else:
+            elif attr_key in eeprom_attrs:
                 expected_value = eeprom_attrs.get(attr_key)
+            else:
+                expected_value = cmis_fw_attrs.get(attr_key)
             if expected_value is None:
                 continue
 

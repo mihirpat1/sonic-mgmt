@@ -27,26 +27,10 @@ Before executing the DOM tests, ensure the following pre-requisites are met:
 
 - The testbed is set up according to the [Testbed Topology](test_plan.md#testbed-topology)
 - All the pre-requisites mentioned in [Transceiver Onboarding Test Infrastructure and Framework](test_plan.md#test-prerequisites-and-configuration-files) must be met
+- `dom.json` is properly formatted and accessible; required attributes are defined for the transceivers under test
+- DOM monitoring is enabled in CONFIG_DB for all relevant ports under test (verified once at session start — see [Common Test Setup and Teardown](#common-test-setup-and-teardown))
 
-### Environment Validation
-
-Before starting tests, verify the following system conditions:
-
-1. **System Health Check**
-   - All critical services are running (xcvrd, pmon, swss, syncd) for at least 5 minutes
-   - No existing system errors in logs (specific error patterns can be added here)
-
-2. **Transceiver Baseline Verification**
-   - All expected transceivers are present and detected
-   - All links are in operational state
-   - No existing I2C communication errors
-   - LLDP neighbors are discovered (if LLDP is enabled)
-
-3. **Configuration Validation**
-   - `dom.json` configuration file is properly formatted and accessible
-   - All required attributes are defined for the transceivers under test
-   - Platform-specific settings are correctly configured
-   - DOM monitoring config is enabled for all relevant ports under test
+System health (running daemons, fresh logs) and transceiver baseline (presence, link-up) are covered by the parent's [Common Session-Level Prerequisites](test_plan.md#common-session-level-prerequisites) and [Common Per-Test Health Checks](test_plan.md#common-per-test-health-checks); see the prerequisite matrix for which gates DOM consumes.
 
 ## Attributes
 
@@ -166,25 +150,13 @@ For detailed CLI commands used in the test cases below, please refer to the [CLI
 
 ## Test Cases
 
-**Test Execution Prerequisites:**
-
-The following tests from the [Transceiver Onboarding Test Infrastructure and Framework](test_plan.md#cross-category-prerequisite-tests-and-health-checks) will be run prior to executing the DOM tests:
-
-- Transceiver presence check
-- Ensure active firmware is gold firmware (for non-DAC CMIS transceivers)
-- Link up verification
-- LLDP verification (if enabled)
-- Ensure DOM monitoring is enabled for all relevant ports under test
-
-> **Note:** Each prerequisite check is itself a test case. If a prerequisite test case fails, the dependent DOM test case will also be declared as failed.
-
 **Assumptions for the Below Tests:**
 
 - All the below tests will be executed for all the transceivers connected to the DUT (the port list is derived from the `port_attributes_dict`) unless specified otherwise.
 
 ### Common Test Setup and Teardown
 
-The following setup and teardown steps apply to **all test cases** in this plan unless a subcategory explicitly overrides them.
+Inherits the [Common Session-Level Prerequisites](test_plan.md#common-session-level-prerequisites) and [Common Per-Test Health Checks](test_plan.md#common-per-test-health-checks) from the parent framework. DOM tests add the following category-specific checks:
 
 #### Session-Level Setup (once per test run)
 
@@ -192,21 +164,14 @@ The following setup and teardown steps apply to **all test cases** in this plan 
 
 #### Per-Test Setup (before each test case)
 
-1. **Log baseline**: Record the current position in system and kernel logs so post-test inspection can isolate I2C errors or DOM-related failures introduced by this specific test.
-2. **xcvrd PID baseline**: Record the current xcvrd PID for post-test comparison.
-3. **Interface liveness**: Verify all ports under test are operationally up with no recent link flaps. Checked per test because Advanced tests are disruptive and may affect link state.
-4. **Data freshness**: Query `TRANSCEIVER_DOM_SENSOR` in STATE_DB and verify `last_update_time` is within `data_max_age_min` minutes of current time.
+1. **Interface liveness**: Verify all ports under test are operationally up with no recent link flaps. Checked per test because Advanced tests are disruptive and may affect link state.
+2. **Data freshness**: Query `TRANSCEIVER_DOM_SENSOR` in STATE_DB and verify `last_update_time` is within `data_max_age_min` minutes of current time.
 
-#### Common Teardown (after each test case)
+#### Per-Test Teardown (after each test case)
 
-1. **xcvrd health**: Verify xcvrd PID is unchanged — any change indicates a crash or restart that must be investigated before continuing.
-2. **Log inspection**: Scan system and kernel logs for new I2C errors, DOM-related warnings, or error patterns introduced during the test.
-3. **Core file check**: Confirm no new core files were created under `/var/core/` during the test.
-4. **Data freshness**: Re-verify `last_update_time` in `TRANSCEIVER_DOM_SENSOR` is within `data_max_age_min` minutes of current time for all ports under test.
+1. **Data freshness**: Re-verify `last_update_time` in `TRANSCEIVER_DOM_SENSOR` is within `data_max_age_min` minutes of current time for all ports under test.
 
 ### Basic DOM Functionality Tests
-
-**Subcategory setup/teardown**: No additional setup or teardown beyond [Common Test Setup and Teardown](#common-test-setup-and-teardown) above.
 
 | TC No. | Test | Steps | Expected Results |
 |------|------|------|------------------|
@@ -217,7 +182,7 @@ The following setup and teardown steps apply to **all test cases** in this plan 
 
 ### Advanced DOM Testing
 
-**Subcategory setup/teardown**: No additional setup or teardown beyond [Common Test Setup and Teardown](#common-test-setup-and-teardown). Each test case's steps already include the TC-specific baselines it needs (e.g., remote-side DOM values, link flap counts). Failure-path recovery (restoring shutdown interfaces, re-enabling DOM polling) is handled by the session-level [Cleanup](#cleanup-and-post-test-verification).
+> **Note:** Each test case's steps include the TC-specific baselines it needs (e.g., remote-side DOM values, link flap counts). Failure-path recovery (restoring shutdown interfaces, re-enabling DOM polling) is handled by the session-level [Cleanup](#cleanup-and-post-test-verification).
 
 | TC No. | Test | Steps | Expected Results |
 |------|------|------|------------------|
@@ -227,7 +192,7 @@ The following setup and teardown steps apply to **all test cases** in this plan 
 
 ## Cleanup and Post-Test Verification
 
-The following steps are performed once after **all test cases** in this plan have completed. Per-test teardown (xcvrd PID check, log scan, core file check, data freshness) already covers ongoing health monitoring throughout the run.
+The following steps are performed once after **all test cases** in this plan have completed. The [Common Per-Test Health Checks](test_plan.md#common-per-test-health-checks) already cover ongoing health monitoring throughout the run.
 
 ### State Restoration
 

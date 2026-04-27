@@ -33,25 +33,9 @@ Before executing the system tests, ensure the following pre-requisites are met:
 
 - The testbed is set up according to the [Testbed Topology](test_plan.md#testbed-topology)
 - All the pre-requisites mentioned in [Transceiver Onboarding Test Infrastructure and Framework](test_plan.md#test-prerequisites-and-configuration-files) must be met
+- `system.json` is properly formatted and accessible; required attributes are defined for the transceivers under test, and platform-specific settings are correctly configured
 
-### Environment Validation
-
-Before starting tests, verify the following system conditions:
-
-1. **System Health Check**
-   - All critical services are running (xcvrd, pmon, swss, syncd)
-   - No existing system errors in logs
-
-2. **Transceiver Baseline Verification**
-   - All expected transceivers are present and detected
-   - All links are in operational state
-   - No existing I2C communication errors
-   - LLDP neighbors are discovered (if LLDP is enabled)
-
-3. **Configuration Validation**
-   - `system.json` configuration file is properly formatted and accessible
-   - All required attributes are defined for the transceivers under test
-   - Platform-specific settings are correctly configured
+System health (running daemons, fresh logs) and transceiver baseline (presence, gold firmware, link-up) are covered by the parent's [Common Session-Level Prerequisites](test_plan.md#common-session-level-prerequisites) and [Common Per-Test Health Checks](test_plan.md#common-per-test-health-checks); see the prerequisite matrix for which gates System consumes.
 
 ## Attributes
 
@@ -112,17 +96,6 @@ For detailed CLI commands used in the test cases below, please refer to the [CLI
 
 ## Test Cases
 
-**Test Execution Prerequisites:**
-
-The following tests from the [Transceiver Onboarding Test Infrastructure and Framework](test_plan.md#cross-category-prerequisite-tests-and-health-checks) will be run prior to executing the system tests:
-
-- Transceiver presence check
-- Ensure active firmware is gold firmware (for non-DAC CMIS transceivers)
-- Link up verification
-- LLDP verification (if enabled)
-
-> **Note:** Each prerequisite check is itself a test case. If a prerequisite test case fails, the dependent system test case will also be declared as failed.
-
 **Assumptions for the Below Tests:**
 
 - All the below tests will be executed for all the transceivers connected to the DUT (the port list is derived from the `port_attributes_dict`) unless specified otherwise.
@@ -172,7 +145,7 @@ This procedure is used after any test that modifies transceiver state or after s
    - Verify port appears in LLDP neighbor table
    - Confirm LLDP neighbor information is correctly populated (remote device ID, port ID, etc. if applicable)
 
-3. **CMIS State Verification** (for non-DAC CMIS transceivers (can be checked via `is_non_dac_and_cmis` attribute))
+3. **CMIS State Verification** (for CMIS active optical transceivers (can be checked via `cmis_active_optical` attribute))
    - Verify DataPathState is `DPActivated` for operational ports
    - Verify ConfigState is `ConfigSuccess`
 
@@ -205,21 +178,15 @@ This procedure ensures tests don't interfere with each other:
 
 ### Common Test Setup and Teardown
 
-The following setup and teardown steps apply to **all test cases** in this plan, complementing the **State Preservation and Restoration** and **Standard Port Recovery and Verification Procedure** defined above.
+Inherits the [Common Session-Level Prerequisites](test_plan.md#common-session-level-prerequisites) and [Common Per-Test Health Checks](test_plan.md#common-per-test-health-checks) from the parent framework, complementing the **State Preservation and Restoration** and **Standard Port Recovery and Verification Procedure** defined above. System tests add the following category-specific checks:
 
 #### Common Setup (before each test case)
 
 1. **Link status baseline**: Verify all ports in `port_attributes_dict` are operationally up. Record `last_up_time` and link flap count per port.
-2. **Service PID baseline**: Record PIDs of xcvrd, pmon, swss, and syncd for post-test comparison.
-3. **Core file baseline**: Record the list of existing files in `/var/core/` before the test begins.
-4. **Log baseline**: Record the current position in system and kernel logs so post-test inspection can isolate entries introduced by the test.
 
 #### Common Teardown (after each test case)
 
-1. **xcvrd health**: Verify xcvrd PID matches the baseline (or has restarted as intentionally expected for service/reboot tests). Any unintended PID change must be investigated before proceeding.
-2. **Core file audit**: Compare `/var/core/` against the baseline to detect any new core files created during the test.
-3. **Log inspection**: Scan system and kernel logs from the baseline position for unexpected errors not attributable to the test's intentional disruption.
-4. **Link recovery**: If the test left any port in a non-operational state (e.g., due to mid-test failure), execute **Standard Port Recovery and Verification Procedure** for affected ports before proceeding to the next test.
+1. **Link recovery**: If the test left any port in a non-operational state (e.g., due to mid-test failure), execute **Standard Port Recovery and Verification Procedure** for affected ports before proceeding to the next test.
 
 ### Link Behavior Test Cases
 
@@ -234,7 +201,7 @@ The following tests aim to validate the link status and stability of transceiver
 
 ### Process and Service Restart Test Cases
 
-**Subcategory setup/teardown**: Disruptive — intentionally restarts services or daemons. Note: the common teardown PID check does not flag PID changes in this subcategory since service restarts are the subject of the test; instead, verify that each restarted service comes back up and is running before the test is considered complete. Additional teardown: if a service fails to restart or remains down after the test, manually restart it (e.g., `sudo systemctl restart pmon`) before proceeding to the next test case.
+**Subcategory setup/teardown**: Disruptive — intentionally restarts services or daemons. Note: the framework's PID check is overridden in this subcategory's conftest since service restarts are the subject of the test; instead, verify that each restarted service comes back up and is running before the test is considered complete. Additional teardown: if a service fails to restart or remains down after the test, manually restart it (e.g., `sudo systemctl restart pmon`) before proceeding to the next test case.
 
 | TC No. | Test | Steps | Expected Results |
 |------|------|------|------------------|
@@ -303,7 +270,7 @@ The following tests aim to validate the link status and stability of transceiver
 
 ## Cleanup and Post-Test Verification
 
-The following steps are performed once after **all test cases** in this plan have completed. Per-test teardown (xcvrd PID check, log scan, core file check, link recovery) already covers ongoing health monitoring throughout the run.
+The following steps are performed once after **all test cases** in this plan have completed. The [Common Per-Test Health Checks](test_plan.md#common-per-test-health-checks) already cover ongoing health monitoring throughout the run.
 
 ### State Restoration
 

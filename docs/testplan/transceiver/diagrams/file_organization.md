@@ -31,7 +31,7 @@ ansible/files/transceiver/inventory/
 ```mermaid
 graph TD
     NM[normalization_mappings.json] --> B[Framework Parser]
-    A[dut_info/<dut_hostname>.json] --> B
+    A["dut_info/&lt;dut_hostname&gt;.json"] --> B
     C[eeprom.json] --> B
     D[system.json] --> B
     E[physical_oir.json] --> B
@@ -76,7 +76,7 @@ graph TD
 tests/transceiver/
 ├── __init__.py
 ├── conftest.py                              # Top-level fixtures:
-│                                            #   - Session-scoped prerequisite fixtures (presence, gold FW, link-up)
+│                                            #   - Session-scoped prerequisite fixtures (presence, gold FW, links up)
 │                                            #     that call common/prerequisites.py (run once per session)
 │                                            #   - Autouse per-test health check fixture that calls
 │                                            #     common/health_checks.py (PID, logs, core files)
@@ -97,7 +97,7 @@ tests/transceiver/
 │   ├── __init__.py
 │   ├── health_checks.py                     # Per-test health: PID baseline/verify, log baseline/scan, core file check
 │   ├── prerequisites.py                     # Cross-category prerequisite logic: presence check, gold FW check,
-│   │                                        #   link-up check, LLDP check — called by conftest.py session fixtures
+│   │                                        #   link-up check — called by conftest.py session fixtures
 │   │                                        #   AND by the owning test category's reportable test cases
 │   ├── verification.py                      # Standard Port Recovery and Verification Procedure
 │   ├── state_management.py                  # State Preservation and Restoration helpers
@@ -106,8 +106,10 @@ tests/transceiver/
 │
 ├── eeprom/
 │   ├── __init__.py
-│   ├── conftest.py                          # EEPROM-specific fixtures (no prerequisite gate —
-│   │                                        #   TC 1-2 own the presence check directly)
+│   ├── conftest.py                          # EEPROM-specific fixtures; autouse fixture requests
+│                                            #   links_verified from top-level conftest.py.
+│                                            #   (presence and gold-FW are EEPROM's own reportable
+│                                            #   tests, so those gates are intentionally not consumed.)
 │   ├── test_presence.py                     # TC 1-2: Transceiver presence verification (reportable test case;
 │   │                                        #   calls common/prerequisites.py::check_presence)
 │   ├── test_eeprom_content.py               # TC 3-4: Basic EEPROM content verification
@@ -187,14 +189,16 @@ tests/transceiver/
 ├── cdb_fw_upgrade/
 │   ├── __init__.py
 │   ├── conftest.py                          # CDB FW upgrade-specific fixtures; autouse fixture requests
-│   │                                        #   presence_verified from top-level conftest.py
+│   │                                        #   presence_verified, links_verified from top-level conftest.py
+│   │                                        #   (gold FW is CDB FW's own reportable test, so that gate is
+│   │                                        #    intentionally not consumed.)
 │   └── test_fw_upgrade.py                   # CDB FW upgrade test cases; includes gold FW check
-│                                            #   (reportable test case; calls common/prerequisites.py::check_gold_fw)
+│                                            #   (reportable test case; calls common/prerequisites.py::check_gold_firmware)
 │
 ├── port_config/
 │   ├── __init__.py
 │   ├── conftest.py                          # Port config-specific fixtures
-│   └── test_port_config.py                  # Port speed, FEC, MTU, autoneg, DOM polling, cross-layer
+│   └── test_port_config.py                  # Port speed, FEC, MTU, autoneg, DOM polling, subport
 │
 ├── vdm/
 │   ├── __init__.py
@@ -212,7 +216,7 @@ tests/transceiver/
 ```text
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        conftest.py (top-level)                         │
-│   Session fixtures: presence_verified, gold_fw_verified, links_verified│
+│   Session fixtures: presence_verified, gold_fw_verified                │
 │   Autouse per-test: health_checks (PID, logs, cores)                   │
 └──────────┬─────────────────────────────┬───────────────────────────────┘
            │ calls                       │ provides fixtures to
@@ -222,9 +226,9 @@ tests/transceiver/
 │  health_checks.py         │  │  eeprom/conftest.py  — no prerequisite   │
 │  prerequisites.py         │  │                        gate (TC 1-2 own) │
 │  verification.py          │  │  dom/conftest.py     — requests presence,│
-│                           │  │                        gold_fw, links    │
+│                           │  │                        gold_fw           │
 │  state_management.py      │  │  system/conftest.py  — requests presence,│
-│  db_helpers.py            │  │                        gold_fw, links    │
+│  db_helpers.py            │  │                        gold_fw           │
 │  cli_helpers.py           │  │  cdb_fw/conftest.py  — requests presence │
 └──────────┬───────────────┘  └──────────────────┬───────────────────────┘
            │ uses                                 │ uses

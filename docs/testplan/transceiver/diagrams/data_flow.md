@@ -33,7 +33,7 @@ graph TB
     end
 
     subgraph "Test Infrastructure"
-        S[conftest.py Session Fixtures]
+        S[conftest.py session Fixtures]
         T[common/prerequisites.py]
         U[common/health_checks.py]
     end
@@ -166,12 +166,12 @@ Parsed Components:
 For Ethernet4 EEPROM_ATTRIBUTES:
 
 Priority Resolution:
-1. defaults.dual_bank_supported = false
-2. deployment_configurations.2x100G_100G_SIDE.dual_bank_supported = true  ← WINS
-3. vendor.ACME_CORP.defaults.dual_bank_supported = false
+1. defaults.vdm_supported = false
+2. deployment_configurations.2x100G_100G_SIDE.vdm_supported = true  ← WINS
+3. vendor.ACME_CORP.defaults.vdm_supported = false
 4. No higher priority overrides found
 
-Result: dual_bank_supported = true
+Result: vdm_supported = true
 ```
 
 ### Step 4: Final Structure
@@ -187,8 +187,7 @@ port_attributes_dict = {
             # ... other parsed fields
         },
         "EEPROM_ATTRIBUTES": {
-            "dual_bank_supported": true,
-            "vdm_supported": false,
+            "vdm_supported": true,
             # ... other resolved attributes
         },
         "SYSTEM_ATTRIBUTES": {

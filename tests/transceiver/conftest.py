@@ -2,21 +2,35 @@ import os
 import pytest
 import logging
 import warnings
+from pathlib import Path
 
 from .inventory.parser import TransceiverInventory
 
 from tests.common.platform.interface_utils import get_physical_port_indices
 
-# Import attribute infra components
-from tests.transceiver.infra.dut_info_loader import DutInfoLoader
-from tests.transceiver.infra.attribute_manager import AttributeManager
-from tests.transceiver.infra.template_validator import STATUS_FULLY, STATUS_PARTIAL, TemplateValidator
-from tests.transceiver.infra.exceptions import DutInfoError, AttributeMergeError, TemplateValidationError
-from tests.transceiver.infra.utils import format_kv_block
-from tests.transceiver.infra.paths import (
+# Import attribute parser components
+from tests.transceiver.attribute_parser.dut_info_loader import DutInfoLoader
+from tests.transceiver.attribute_parser.attribute_manager import AttributeManager
+from tests.transceiver.attribute_parser.template_validator import STATUS_FULLY, STATUS_PARTIAL, TemplateValidator
+from tests.transceiver.attribute_parser.exceptions import DutInfoError, AttributeMergeError, TemplateValidationError
+from tests.transceiver.attribute_parser.utils import format_kv_block
+from tests.transceiver.attribute_parser.paths import (
     REL_ATTR_DIR,
     REL_DEPLOYMENT_TEMPLATES_FILE,
     get_repo_root,
+)
+
+# Shared prerequisite + health-check primitives (also called from reportable test cases).
+from tests.transceiver.common.prerequisites import (
+    check_gold_firmware,
+    check_links_up,
+    check_presence_show_cli,
+)
+from tests.transceiver.common.health_checks import (
+    capture_baseline,
+    run_post_check,
+    run_pre_check,
+    verify_health,
 )
 
 pytestmark = [
@@ -27,6 +41,28 @@ logger = logging.getLogger(__name__)
 
 REPO_ROOT = get_repo_root()
 
+# Session-wide health-check event log, consumed by pytest_terminal_summary.
+# Category conftest files import this list and pass it to
+# run_pre_check / run_post_check so all events accumulate in one place.
+health_check_events = []
+
+# Cached at module import; used by pytest_collection_modifyitems to scope
+# the skip_check_dut_health marker to items under tests/transceiver/.
+_TRANSCEIVER_ROOT = Path(__file__).resolve().parent
+
+
+def _is_under_transceiver_root(item_path):
+    """Return True iff *item_path* is inside this conftest's directory.
+
+    Implemented with try/except on Path.relative_to to remain compatible
+    with Python < 3.9 (Path.is_relative_to was added in 3.9).
+    """
+    try:
+        Path(str(item_path)).resolve().relative_to(_TRANSCEIVER_ROOT)
+    except ValueError:
+        return False
+    return True
+
 
 def pytest_addoption(parser):
     """Add transceiver infra specific CLI options."""
@@ -34,6 +70,32 @@ def pytest_addoption(parser):
         "--skip_transceiver_template_validation", action="store_true", default=False,
         help="Skip template validation even if deployment templates file exists"
     )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Apply skip_check_dut_health to every transceiver test.
+
+    The transceiver suite has its own per-test health check fixture
+    (_per_test_health_check) that monitors core dumps and PIDs at finer
+    granularity, so the global module-scoped core_dump_and_config_check
+    fixture in tests/conftest.py is redundant.
+
+    Note: pytest_collection_modifyitems receives ALL items in the session,
+    not just those under this conftest, so we filter by path. The parent
+    Module is tagged in addition to each item, because
+    core_dump_and_config_check is module-scoped and inspects markers via
+    request.node (the Module) which does not see item-level markers.
+    """
+    skip_marker = pytest.mark.skip_check_dut_health
+    tagged_modules = set()
+    for item in items:
+        if not _is_under_transceiver_root(item.fspath):
+            continue
+        item.add_marker(skip_marker)
+        module = item.getparent(pytest.Module)
+        if module is not None and module.nodeid not in tagged_modules:
+            module.add_marker(skip_marker)
+            tagged_modules.add(module.nodeid)
 
 
 def _load_platform_hwsku(duthost):
@@ -146,6 +208,100 @@ def _ensure_transceiver_infra_initialized(port_attributes_dict):
         for category, attrs in categories.items():
             logger.info(format_kv_block(f"{port} {category}", attrs))
     return
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Session-scoped prerequisite fixtures (gates).
+# These are session-scoped (computed once per session) but NOT autouse —
+# a category opts in by requesting the fixture from its own conftest.py
+# (typically via an autouse fixture that lists the gates as parameters).
+# Each gate wraps a check primitive in common/prerequisites.py and calls
+# pytest.skip on failure so every dependent test is skipped with a clear
+# message.
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(scope="session")
+def presence_verified(duthost, port_attributes_dict):
+    """Gate: all transceivers in port_attributes_dict are present.
+
+    Opted into by DOM, System, CDB FW (via their category conftests).
+    EEPROM does NOT opt in — it owns the presence test cases directly.
+    """
+    result = check_presence_show_cli(duthost, port_attributes_dict)
+    if not result["passed"]:
+        pytest.skip(f"Prerequisite failed - {result['details']}")
+    logger.info("Prerequisite PASSED: %s", result["details"])
+    return result
+
+
+@pytest.fixture(scope="session")
+def gold_fw_verified(duthost, port_attributes_dict):
+    """Gate: every non-DAC CMIS transceiver runs its expected gold firmware.
+
+    Opted into by DOM, System (via their category conftests). CDB FW does
+    NOT opt in — it owns the gold-firmware test case directly.
+    """
+    result = check_gold_firmware(duthost, port_attributes_dict)
+    if not result["passed"]:
+        pytest.skip(f"Prerequisite failed - {result['details']}")
+    logger.info("Prerequisite PASSED: %s", result["details"])
+    return result
+
+
+@pytest.fixture(scope="session")
+def links_verified(duthost, port_attributes_dict):
+    """Gate: every transceiver port in port_attributes_dict is admin-up and oper-up.
+
+    Opted into by EEPROM, DOM, System, CDB FW (via their category
+    conftests). Port Config does NOT opt in — its tests query CONFIG_DB
+    only and do not require live links.
+    """
+    result = check_links_up(duthost, port_attributes_dict)
+    if not result["passed"]:
+        pytest.skip(f"Prerequisite failed - {result['details']}")
+    logger.info("Prerequisite PASSED: %s", result["details"])
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Per-test health-check fixture (autouse, function-scoped).
+# Pre-test failures skip the test; post-test failures abort the session.
+# Both phases append to health_check_events for the terminal summary.
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _per_test_health_check(request, duthost):
+    """Capture health baseline before each test; verify before and after."""
+    baseline = capture_baseline(duthost)
+    logger.debug("Health baseline captured for %s", request.node.name)
+
+    pre_checks = [
+        (f"process_{process}_running", status == "RUNNING",
+         f"Process {process} is {status}, expected RUNNING")
+        for process, (status, _pid) in baseline.pid_baselines.items()
+    ]
+    run_pre_check(request, pre_checks, health_check_events)
+
+    yield baseline
+
+    result = verify_health(duthost, baseline)
+    post_checks = [
+        ("system_health", result["passed"], "; ".join(result["failures"])),
+    ]
+    run_post_check(request, post_checks, health_check_events)
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Print a consolidated health-check report at the end of the session."""
+    if not health_check_events:
+        return
+    terminalreporter.section("Health Check Summary")
+    for event in health_check_events:
+        terminalreporter.write_line(
+            f"  [{event['phase']}] {event['test']}: {event['details']}"
+        )
 
 
 @pytest.fixture(scope="session")

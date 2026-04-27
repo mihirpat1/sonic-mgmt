@@ -1,0 +1,261 @@
+"""Shared prerequisite check primitives for transceiver tests.
+
+Each function returns a result dict (with ``'passed'`` and ``'details'`` keys);
+the caller decides whether to ``pytest.skip``, ``pytest.fail``, or assert.
+"""
+import logging
+
+from tests.common.platform.interface_utils import get_dut_interfaces_status
+from tests.transceiver.attribute_parser.attribute_keys import EEPROM_ATTRIBUTES_KEY
+from tests.transceiver.utils.cli_parser_helper import parse_eeprom
+
+logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────────────────────────────
+# Transceiver presence check
+# ──────────────────────────────────────────────────────────────────────
+
+CMD_SHOW_PRESENCE = "show interface transceiver presence"
+CMD_SFPUTIL_PRESENCE = "sfputil show presence"
+
+
+def _check_presence_common(presence_map, expected_ports, label):
+    """Shared result-building logic for presence checks.
+
+    Args:
+        presence_map: dict {port_name: presence_status_string}
+        expected_ports: set of port names to verify
+        label: human-readable label for log/details (e.g. "sfputil", "show CLI")
+
+    Returns:
+        dict with 'passed', 'present', 'missing', 'details'
+    """
+    present = []
+    missing = []
+    for port in sorted(expected_ports):
+        status = presence_map.get(port, "")
+        if status == "Present":
+            present.append(port)
+        else:
+            missing.append(port)
+            logger.warning("Port %s: expected Present (%s), got '%s'", port, label, status)
+
+    passed = len(missing) == 0
+    total = len(expected_ports)
+    if passed:
+        details = f"{len(present)}/{total} transceivers present ({label})"
+    else:
+        details = (
+            f"{len(missing)}/{total} transceivers NOT present ({label}): "
+            + ", ".join(missing)
+        )
+    logger.info("Presence check (%s): %s", label, details)
+    return {"passed": passed, "present": present, "missing": missing, "details": details}
+
+
+def check_presence_show_cli(duthost, port_attributes_dict):
+    """Verify every port in *port_attributes_dict* reports transceiver Present.
+
+    Uses ``show interface transceiver presence`` CLI.
+
+    Returns:
+        dict: {'passed': bool, 'present': [str], 'missing': [str], 'details': str}
+    """
+    expected_ports = set(port_attributes_dict.keys())
+    if not expected_ports:
+        return {
+            "passed": False,
+            "present": [],
+            "missing": [],
+            "details": "port_attributes_dict is empty - nothing to verify",
+        }
+
+    result = duthost.show_and_parse(CMD_SHOW_PRESENCE)
+    presence_map = {
+        entry["port"]: entry.get("presence", "").strip()
+        for entry in result
+    }
+
+    return _check_presence_common(presence_map, expected_ports, "show CLI")
+
+
+def check_presence_sfputil(duthost, port_attributes_dict):
+    """Verify every port in *port_attributes_dict* reports Present via sfputil.
+
+    Uses ``sfputil show presence`` CLI.  The output format is a fixed-width
+    table::
+
+        Port        Presence
+        ----------  ----------
+        Ethernet0   Present
+        Ethernet4   Present
+
+    Returns:
+        dict: {'passed': bool, 'present': [str], 'missing': [str], 'details': str}
+    """
+    expected_ports = set(port_attributes_dict.keys())
+    if not expected_ports:
+        return {
+            "passed": False,
+            "present": [],
+            "missing": [],
+            "details": "port_attributes_dict is empty - nothing to verify",
+        }
+
+    output = duthost.command(CMD_SFPUTIL_PRESENCE, module_ignore_errors=True)
+    if output.get("rc", 1) != 0:
+        return {
+            "passed": False,
+            "present": [],
+            "missing": sorted(expected_ports),
+            "details": f"sfputil command failed: {output.get('stderr', '')}",
+        }
+
+    presence_map = _parse_sfputil_presence(output.get("stdout_lines", []))
+
+    return _check_presence_common(presence_map, expected_ports, "sfputil")
+
+
+def _parse_sfputil_presence(stdout_lines):
+    """Parse the fixed-width table output of ``sfputil show presence``.
+
+    Returns:
+        dict: {port_name: presence_status}
+    """
+    presence = {}
+    for line in stdout_lines:
+        stripped = line.strip()
+        # Skip header/separator lines
+        if not stripped or stripped.startswith("Port") or stripped.startswith("---"):
+            continue
+        parts = stripped.split()
+        if len(parts) >= 2:
+            # presence value can be multi-word (e.g. "Not present")
+            presence[parts[0]] = " ".join(parts[1:])
+    return presence
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Gold firmware check (non-DAC CMIS transceivers)
+# ──────────────────────────────────────────────────────────────────────
+
+CMD_SHOW_TRANSCEIVER_INFO = "show interfaces transceiver info"
+CLI_KEY_ACTIVE_FIRMWARE = "Active Firmware"
+
+
+def check_gold_firmware(duthost, port_attributes_dict):
+    """Verify active firmware equals the expected gold firmware.
+
+    Only ports whose ``EEPROM_ATTRIBUTES.cmis_active_optical`` is True and
+    that define ``gold_firmware_version`` are evaluated. Other ports are
+    silently skipped (they have no expectation to compare against).
+
+    Returns:
+        dict: {'passed': bool, 'matched': [str], 'mismatched': [str],
+               'skipped': [str], 'details': str}
+    """
+    expected_ports = set(port_attributes_dict.keys())
+    if not expected_ports:
+        return {
+            "passed": False,
+            "matched": [], "mismatched": [], "skipped": [],
+            "details": "port_attributes_dict is empty - nothing to verify",
+        }
+
+    output = duthost.command(CMD_SHOW_TRANSCEIVER_INFO, module_ignore_errors=True)
+    if output.get("rc", 1) != 0:
+        return {
+            "passed": False,
+            "matched": [], "mismatched": sorted(expected_ports), "skipped": [],
+            "details": f"'{CMD_SHOW_TRANSCEIVER_INFO}' failed: {output.get('stderr', '')}",
+        }
+    parsed = parse_eeprom(output.get("stdout_lines", []))
+
+    matched = []
+    mismatched = []
+    skipped = []
+    for port in sorted(expected_ports):
+        eeprom_attrs = port_attributes_dict[port].get(EEPROM_ATTRIBUTES_KEY, {})
+        if not eeprom_attrs.get("cmis_active_optical"):
+            skipped.append(port)
+            continue
+        expected_fw = eeprom_attrs.get("gold_firmware_version")
+        if not expected_fw:
+            skipped.append(port)
+            continue
+        actual_fw = parsed.get(port, {}).get(CLI_KEY_ACTIVE_FIRMWARE, "").strip()
+        if actual_fw == expected_fw:
+            matched.append(port)
+        else:
+            mismatched.append(f"{port}(actual={actual_fw or 'N/A'}, expected={expected_fw})")
+            logger.warning("Port %s: active FW '%s' != gold FW '%s'", port, actual_fw, expected_fw)
+
+    passed = len(mismatched) == 0
+    if passed:
+        details = (
+            f"{len(matched)} ports running gold firmware, {len(skipped)} skipped "
+            "(non-CMIS-active or no gold version configured)"
+        )
+    else:
+        details = (
+            f"{len(mismatched)} port(s) NOT running gold firmware: "
+            + "; ".join(mismatched)
+        )
+    logger.info("Gold firmware check: %s", details)
+    return {
+        "passed": passed,
+        "matched": matched,
+        "mismatched": mismatched,
+        "skipped": skipped,
+        "details": details,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Link-up check
+# ──────────────────────────────────────────────────────────────────────
+
+
+def check_links_up(duthost, port_attributes_dict):
+    """Verify every port in *port_attributes_dict* is admin-up and oper-up.
+
+    Uses ``show interface description`` parsed via the shared
+    ``parse_intf_status`` helper. Ports missing from the CLI output are
+    treated as failures.
+
+    Returns:
+        dict: {'passed': bool, 'up': [str], 'down': [str], 'details': str}
+    """
+    expected_ports = set(port_attributes_dict.keys())
+    if not expected_ports:
+        return {
+            "passed": False,
+            "up": [], "down": [],
+            "details": "port_attributes_dict is empty - nothing to verify",
+        }
+
+    intf_status = get_dut_interfaces_status(duthost)
+
+    up = []
+    down = []
+    for port in sorted(expected_ports):
+        status = intf_status.get(port)
+        if status and status.get("admin") == "up" and status.get("oper") == "up":
+            up.append(port)
+        else:
+            admin = status.get("admin", "missing") if status else "missing"
+            oper = status.get("oper", "missing") if status else "missing"
+            down.append(f"{port}(admin={admin}, oper={oper})")
+            logger.warning("Port %s not up: admin=%s oper=%s", port, admin, oper)
+
+    passed = len(down) == 0
+    total = len(expected_ports)
+    if passed:
+        details = f"{len(up)}/{total} transceiver ports admin-up and oper-up"
+    else:
+        details = (
+            f"{len(down)}/{total} transceiver port(s) NOT up: "
+            + "; ".join(down)
+        )
+    logger.info("Link-up check: %s", details)
+    return {"passed": passed, "up": up, "down": down, "details": details}
