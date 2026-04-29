@@ -5,7 +5,6 @@ Used by the autouse function-scoped fixture in conftest.py to capture baselines
 before each test and verify system health after each test.
 """
 import logging
-from collections import namedtuple
 
 import pytest
 
@@ -20,26 +19,24 @@ DEFAULT_MONITORED_PROCESSES = {
 }
 
 # Shell snippet used by both capture_baseline and verify_health to list files
-# in /var/core/. Cannot be merged with the PID lookup because get_program_info
-# uses a separate `docker exec ... supervisorctl` call, but each snapshot is
-# now a single shell round-trip rather than several.
-_FIND_CORE_FILES_CMD = (
-    "find /var/core/ -maxdepth 1 -type f -printf '%f\n' 2>/dev/null || true"
-)
-
-
-HealthBaseline = namedtuple("HealthBaseline", ["pid_baselines", "core_files"])
-"""Snapshot of system health state captured before a test runs.
-
-Fields:
-    pid_baselines: dict ``{process: (status, pid)}``
-    core_files:    set of filenames currently in ``/var/core/``
-"""
+# in /var/core/.
+_FIND_CORE_FILES_CMD = "find /var/core/ -maxdepth 1 -type f -printf '%f\n'"
 
 
 def _list_core_files(duthost):
-    """Return the current set of files in /var/core/ on the DUT."""
+    """Return the current set of files in /var/core/ on the DUT.
+
+    Logs a warning and returns an empty set if the shell command fails so the
+    health check can still complete; the caller decides whether the failure to
+    enumerate cores is itself worth flagging.
+    """
     result = duthost.shell(_FIND_CORE_FILES_CMD, module_ignore_errors=True)
+    if result.get("rc", 1) != 0:
+        logger.warning(
+            "Failed to list /var/core/ (rc=%s): %s",
+            result.get("rc"), result.get("stderr", "").strip(),
+        )
+        return set()
     stdout = result.get("stdout", "")
     return set(stdout.splitlines()) if stdout.strip() else set()
 
@@ -53,7 +50,7 @@ def capture_baseline(duthost, monitored_processes=None):
             Defaults to ``DEFAULT_MONITORED_PROCESSES``.
 
     Returns:
-        HealthBaseline
+        dict: ``{"pid_baselines": {process: (status, pid)}, "core_files": set[str]}``
     """
     if monitored_processes is None:
         monitored_processes = DEFAULT_MONITORED_PROCESSES
@@ -67,7 +64,7 @@ def capture_baseline(duthost, monitored_processes=None):
     core_files = _list_core_files(duthost)
     logger.debug("Baseline core files: %d", len(core_files))
 
-    return HealthBaseline(pid_baselines=pid_baselines, core_files=core_files)
+    return {"pid_baselines": pid_baselines, "core_files": core_files}
 
 
 def verify_health(duthost, baseline, monitored_processes=None, expect_pid_change=None):
@@ -75,7 +72,7 @@ def verify_health(duthost, baseline, monitored_processes=None, expect_pid_change
 
     Args:
         duthost: DUT host handle.
-        baseline: HealthBaseline captured before the test.
+        baseline: baseline dict returned by ``capture_baseline``.
         monitored_processes: dict of ``{process_name: container_name}``.
         expect_pid_change: set of process names where a PID change is expected
             (e.g., after an intentional service restart).
@@ -96,14 +93,14 @@ def verify_health(duthost, baseline, monitored_processes=None, expect_pid_change
         if status != "RUNNING":
             failures.append(f"Process {process} ({container}) is {status}, expected RUNNING")
             continue
-        baseline_pid = baseline.pid_baselines.get(process, (None, None))[1]
+        baseline_pid = baseline["pid_baselines"].get(process, (None, None))[1]
         if process not in expect_pid_change and baseline_pid is not None and pid != baseline_pid:
             failures.append(
                 f"Process {process} PID changed: {baseline_pid} -> {pid} (unexpected restart)"
             )
 
     # 2. Check for new core files
-    new_cores = _list_core_files(duthost) - baseline.core_files
+    new_cores = _list_core_files(duthost) - baseline["core_files"]
     if new_cores:
         failures.append(f"New core files detected: {', '.join(sorted(new_cores))}")
 
@@ -151,7 +148,7 @@ def _resolve_action(request, marker_name, option_name, valid_actions):
 
 
 def _evaluate_phase(request, checks, events, phase):
-    """Shared dispatcher for pre- and post-test health-check phases.
+    """Shared dispatcher for pre-test and post-test health-check phases.
 
     Aggregates failed *checks*, resolves the action via marker > CLI option,
     appends a record to *events*, and invokes the matching pytest control flow.

@@ -42,8 +42,6 @@ REPO_ROOT = get_repo_root()
 # Session-wide health-check event log, consumed by pytest_terminal_summary.
 # Category conftest files import this list and pass it to
 # run_pre_check / run_post_check so all events accumulate in one place.
-# Module-level mutable list is safe because pytest instantiates this conftest
-# module once per session.
 health_check_events = []
 
 # Cached at module import to avoid a per-item filesystem resolve in
@@ -275,8 +273,8 @@ def presence_verified(duthost, port_attributes_dict):
     """
     result = check_presence_show_cli(duthost, port_attributes_dict)
     if not result["passed"]:
-        pytest.skip(f"Prerequisite failed - {result['details']}")
-    logger.info("Prerequisite PASSED: %s", result["details"])
+        pytest.skip(f"presence_verified prerequisite failed - {result['details']}")
+    logger.info("presence_verified prerequisite PASSED: %s", result["details"])
     return result
 
 
@@ -285,17 +283,17 @@ def gold_fw_verified(duthost, port_attributes_dict):
     """Gate: every CMIS active-optical transceiver runs its gold firmware.
 
     A port is in scope iff its ``EEPROM_ATTRIBUTES.cmis_active_optical`` is
-    True; for those ports ``gold_firmware_version`` MUST be configured AND
-    must match the active firmware reported by the CLI. Other ports are
-    out of scope (no expectation to compare against).
+    True; for those ports ``CDB_FW_UPGRADE_ATTRIBUTES.gold_firmware_version``
+    MUST be configured AND must match the active firmware reported by the CLI.
+    Other ports are out of scope (no expectation to compare against).
 
     Opted into by DOM, System (via their category conftests). CDB FW does
     NOT opt in — it owns the gold-firmware test case directly.
     """
     result = check_gold_firmware(duthost, port_attributes_dict)
     if not result["passed"]:
-        pytest.skip(f"Prerequisite failed - {result['details']}")
-    logger.info("Prerequisite PASSED: %s", result["details"])
+        pytest.skip(f"gold_fw_verified prerequisite failed - {result['details']}")
+    logger.info("gold_fw_verified prerequisite PASSED: %s", result["details"])
     return result
 
 
@@ -309,8 +307,8 @@ def links_verified(duthost, port_attributes_dict):
     """
     result = check_links_up(duthost, port_attributes_dict)
     if not result["passed"]:
-        pytest.skip(f"Prerequisite failed - {result['details']}")
-    logger.info("Prerequisite PASSED: %s", result["details"])
+        pytest.skip(f"links_verified prerequisite failed - {result['details']}")
+    logger.info("links_verified prerequisite PASSED: %s", result["details"])
     return result
 
 
@@ -330,7 +328,7 @@ def _per_test_health_check(request, duthost):
     pre_checks = [
         (f"process_{process}_running", status == "RUNNING",
          f"Process {process} is {status}, expected RUNNING")
-        for process, (status, _pid) in baseline.pid_baselines.items()
+        for process, (status, _pid) in baseline["pid_baselines"].items()
     ]
     run_pre_check(request, pre_checks, health_check_events)
 

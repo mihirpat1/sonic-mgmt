@@ -117,26 +117,26 @@ Each gate is a session-scoped pytest fixture defined in [`tests/transceiver/conf
 
 | Category (attribute file) | `presence_verified` | `gold_fw_verified` | `links_verified` |
 |---------------------------|:-------------------:|:------------------:|:----------------:|
-| EEPROM (`eeprom.json`)                  | — own reportable test         | — N/A (EEPROM reads independent of FW version) | ✅ |
+| EEPROM (`eeprom.json`)                  | - own reportable test         | - N/A (EEPROM reads independent of FW version) | ✅ |
 | System (`system.json`)                  | ✅                            | ✅                                              | ✅ |
-| Physical OIR (`physical_oir.json`)      | ✅                            | ✅                                              | ✅ (verified pre-test only) |
-| Remote Reseat (`remote_reseat.json`)    | ✅                            | ✅                                              | ✅ (verified pre-test only) |
-| CDB FW Upgrade (`cdb_fw_upgrade.json`)  | ✅                            | — own reportable test                           | ✅ |
+| Physical OIR (`physical_oir.json`)      | ✅                            | ✅                                              | ✅ |
+| Remote Reseat (`remote_reseat.json`)    | ✅                            | ✅                                              | ✅ |
+| CDB FW Upgrade (`cdb_fw_upgrade.json`)  | ✅                            | - own reportable test                           | ✅ |
 | DOM (`dom.json`)                        | ✅                            | ✅                                              | ✅ |
 | VDM (`vdm.json`)                        | ✅                            | ✅                                              | ✅ |
 | PM (`pm.json`)                          | ✅                            | ✅                                              | ✅ |
-| Port Config (`port_config.json`)        | — CONFIG_DB only              | — CONFIG_DB only                                | — CONFIG_DB only |
+| Port Config (`port_config.json`)        | - CONFIG_DB only              | - CONFIG_DB only                                | - CONFIG_DB only |
 
-A "—" entry means the category intentionally does not consume that gate; the trailing note explains why. EEPROM and CDB FW Upgrade skip the gates whose semantics they own as reportable tests (so a gold-FW mismatch surfaces as a CDB FW Upgrade test failure, not a session-wide skip). Physical OIR and Remote Reseat verify links once before the test starts but intentionally tolerate link-down windows during the test itself.
+A "-" entry means the category intentionally does not consume that gate; the trailing note explains why. EEPROM and CDB FW Upgrade skip the gates whose semantics they own as reportable tests (so a gold-FW mismatch surfaces as a CDB FW Upgrade test failure, not a session-wide skip).
 
 #### Common Per-Test Health Checks
 
 An autouse fixture in the top-level `conftest.py` runs before and after **every** transceiver test:
 
-- **Before**: record `xcvrd` PID and `/var/core/` baseline; on failure, take the configured pre-test action (default: skip the test).
-- **After**: verify `xcvrd` PID is unchanged and no new core files appeared; on failure, take the configured post-test action (default: abort the session via `pytest.exit`) so a regression surfaces cleanly.
+- **Before**: verify `xcvrd` is `RUNNING` and record its PID along with the `/var/core/` baseline; on failure (e.g. `xcvrd` not running), take the configured pre-test action (default: skip the test).
+- **After**: verify `xcvrd` is still `RUNNING` with an unchanged PID and that no new core files appeared; on failure, take the configured post-test action (default: abort the session via `pytest.exit`) so a regression surfaces cleanly.
 
-The action for each phase is configurable so an operator can keep a run going through health-check failures (e.g. when triaging on a known-degraded DUT):
+The action for each phase is configurable so a user can keep a run going through health-check failures (e.g. when triaging a specific failure scenario):
 
 | Phase     | Default action              | Action      | Effect                                                                              |
 | --------- | --------------------------- | ----------- | ----------------------------------------------------------------------------------- |
@@ -156,6 +156,48 @@ Every failure is appended to the shared `health_check_events` list and printed i
 The transceiver `conftest.py` also tags every collected item (and its parent `Module`) with `pytest.mark.skip_check_dut_health` to suppress the repo-wide module-scoped `core_dump_and_config_check` fixture, which would otherwise duplicate the per-test work above.
 
 For implementation details (module layout, `run_pre_check` / `run_post_check` helpers, category fixture examples, and how categories add their own pre/post checks while reusing the shared event log), see the source: [`tests/transceiver/conftest.py`](../../../tests/transceiver/conftest.py), [`tests/transceiver/common/prerequisites.py`](../../../tests/transceiver/common/prerequisites.py), and [`tests/transceiver/common/health_checks.py`](../../../tests/transceiver/common/health_checks.py).
+
+##### Adding category-specific pre/post checks
+
+A category (DOM, System, etc) can layer its own pre-test and post-test checks on top of the cross-category ones without modifying the parent fixture. The parent's `_per_test_health_check` stays autouse for every transceiver test; the category's autouse fixture runs **in addition**, never instead - pytest invokes every in-scope autouse fixture for each test, so a category fixture cannot suppress the parent. Both fixtures append to the same `health_check_events` list, so all results appear together in the terminal `Health Check Summary`.
+
+**The check tuple contract.** `run_pre_check` and `run_post_check` accept a list of `(name, passed, details)` tuples:
+
+| Field     | Type   | Meaning                                                                  |
+| --------- | ------ | ------------------------------------------------------------------------ |
+| `name`    | `str`  | Stable identifier for the check (used in logs and the terminal summary). |
+| `passed`  | `bool` | `True` if the check succeeded.                       |
+| `details` | `str`  | Human-readable explanation                |
+
+Each helper applies the resolved action (`skip` / `warn` for pre, `exit` / `warn` for post) once across the batch, so a category should pass *all* its checks for a phase in a single call rather than invoking the helper per check.
+
+**Skeleton for a category conftest** (place under `tests/transceiver/<category>/conftest.py`):
+
+```python
+import pytest
+from tests.transceiver.conftest import health_check_events
+from tests.transceiver.common.health_checks import run_pre_check, run_post_check
+
+# Opt into the cross-category session gates this category consumes.
+@pytest.fixture(autouse=True, scope="session")
+def _category_session_prerequisites(presence_verified, gold_fw_verified, links_verified):
+    return
+
+# Per-test pre/post checks, layered on top of the parent's xcvrd/core checks.
+@pytest.fixture(autouse=True)
+def _category_per_test_checks(request, duthost, port_attributes_dict):
+    pre_checks = [
+        ("category_pre_check_name", <bool>, "<details on failure>"),
+    ]
+    run_pre_check(request, pre_checks, health_check_events)
+    yield
+    post_checks = [
+        ("category_post_check_name", <bool>, "<details on failure>"),
+    ]
+    run_post_check(request, post_checks, health_check_events)
+```
+
+**Health check vs. teardown.** Health checks are read-only assertions about DUT state; they must not perform recovery. Restoring state that a test deliberately mutated (e.g. re-enabling DOM polling after a polling-control test, or starting up an interface left shutdown by a failed test) belongs in a **separate** session-scoped autouse `yield` fixture in the category conftest, not inside `run_post_check`.
 
 ### DUT Info Files
 

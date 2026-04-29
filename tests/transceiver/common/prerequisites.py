@@ -6,7 +6,10 @@ the caller decides whether to ``pytest.skip``, ``pytest.fail``, or assert.
 import logging
 
 from tests.common.platform.interface_utils import get_dut_interfaces_status
-from tests.transceiver.attribute_parser.attribute_keys import EEPROM_ATTRIBUTES_KEY
+from tests.transceiver.attribute_parser.attribute_keys import (
+    CDB_FW_UPGRADE_ATTRIBUTES_KEY,
+    EEPROM_ATTRIBUTES_KEY,
+)
 from tests.transceiver.utils.cli_parser_helper import parse_eeprom
 
 logger = logging.getLogger(__name__)
@@ -138,7 +141,7 @@ def _parse_sfputil_presence(stdout_lines):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Gold firmware check (non-DAC CMIS transceivers)
+# Gold firmware check
 # ──────────────────────────────────────────────────────────────────────
 
 CMD_SHOW_TRANSCEIVER_INFO = "show interfaces transceiver info"
@@ -151,56 +154,73 @@ def check_gold_firmware(duthost, port_attributes_dict):
     A port is in scope iff ``EEPROM_ATTRIBUTES.cmis_active_optical`` is True.
     For every in-scope port:
 
-      * ``gold_firmware_version`` MUST be defined in ``EEPROM_ATTRIBUTES`` -
-        a missing value is reported as a failure (the inventory is incomplete).
-      * the active firmware reported by the CLI MUST equal that value.
+      * ``CDB_FW_UPGRADE_ATTRIBUTES.gold_firmware_version`` MUST be defined -
+        a missing value is a failure (inventory gap).
+      * the active firmware reported by the CLI MUST equal that value -
+        otherwise the port is a failure (FW mismatch).
 
-    Ports that are not CMIS active-optical are out of scope and recorded under
-    ``'skipped'`` (no expectation to compare against).
+    Each failure entry is a self-describing string carrying the port and the
+    reason. Ports that are not CMIS active-optical are out of scope and
+    recorded under ``'skipped'`` (no expectation to compare against).
 
     Returns:
-        dict: ``{'passed': bool, 'matched': [str], 'mismatched': [str],
+        dict: ``{'passed': bool, 'matched': [str], 'failures': [str],
                  'skipped': [str], 'details': str}``
     """
     expected_ports = set(port_attributes_dict.keys())
     if not expected_ports:
         return {
             "passed": True,
-            "matched": [], "mismatched": [], "skipped": [],
+            "matched": [], "failures": [], "skipped": [],
             "details": "no ports to verify (port_attributes_dict is empty)",
+        }
+
+    # Identify in-scope (CMIS active-optical) ports up front so we can avoid
+    # the CLI round-trip + parse when nothing is in scope.
+    in_scope = [
+        port for port in sorted(expected_ports)
+        if port_attributes_dict[port].get(EEPROM_ATTRIBUTES_KEY, {}).get("cmis_active_optical")
+    ]
+    in_scope_set = set(in_scope)
+    skipped = [port for port in sorted(expected_ports) if port not in in_scope_set]
+
+    if not in_scope:
+        details = f"no CMIS active-optical ports in scope; {len(skipped)} out-of-scope port(s) skipped"
+        logger.info("Gold firmware check: %s", details)
+        return {
+            "passed": True,
+            "matched": [], "failures": [], "skipped": skipped,
+            "details": details,
         }
 
     output = duthost.command(CMD_SHOW_TRANSCEIVER_INFO, module_ignore_errors=True)
     if output.get("rc", 1) != 0:
         return {
             "passed": False,
-            "matched": [], "mismatched": sorted(expected_ports), "skipped": [],
+            "matched": [],
+            "failures": [f"'{CMD_SHOW_TRANSCEIVER_INFO}' failed: {output.get('stderr', '')}"],
+            "skipped": skipped,
             "details": f"'{CMD_SHOW_TRANSCEIVER_INFO}' failed: {output.get('stderr', '')}",
         }
     parsed = parse_eeprom(output.get("stdout_lines", []))
 
     matched = []
-    mismatched = []
-    skipped = []
-    for port in sorted(expected_ports):
-        eeprom_attrs = port_attributes_dict[port].get(EEPROM_ATTRIBUTES_KEY, {})
-        if not eeprom_attrs.get("cmis_active_optical"):
-            # Out of scope: gold-firmware contract only applies to CMIS active optics.
-            skipped.append(port)
-            continue
-        expected_fw = eeprom_attrs.get("gold_firmware_version")
+    failures = []
+    for port in in_scope:
+        cdb_fw_attrs = port_attributes_dict[port].get(CDB_FW_UPGRADE_ATTRIBUTES_KEY, {})
+        expected_fw = cdb_fw_attrs.get("gold_firmware_version")
         if not expected_fw:
-            mismatched.append(f"{port}(gold_firmware_version not configured for CMIS active optic)")
+            failures.append(f"{port}: gold_firmware_version not configured")
             logger.warning("Port %s: cmis_active_optical=True but gold_firmware_version missing", port)
             continue
         actual_fw = parsed.get(port, {}).get(CLI_KEY_ACTIVE_FIRMWARE, "").strip()
         if actual_fw == expected_fw:
             matched.append(port)
         else:
-            mismatched.append(f"{port}(actual={actual_fw or 'N/A'}, expected={expected_fw})")
+            failures.append(f"{port}: actual={actual_fw or 'N/A'}, expected={expected_fw}")
             logger.warning("Port %s: active FW '%s' != gold FW '%s'", port, actual_fw, expected_fw)
 
-    passed = len(mismatched) == 0
+    passed = not failures
     if passed:
         details = (
             f"{len(matched)} CMIS active-optical port(s) running gold firmware, "
@@ -208,14 +228,14 @@ def check_gold_firmware(duthost, port_attributes_dict):
         )
     else:
         details = (
-            f"{len(mismatched)} CMIS active-optical port(s) failed gold-firmware check: "
-            + "; ".join(mismatched)
+            f"{len(failures)} CMIS active-optical port(s) failed gold-firmware check: "
+            + "; ".join(failures)
         )
     logger.info("Gold firmware check: %s", details)
     return {
         "passed": passed,
         "matched": matched,
-        "mismatched": mismatched,
+        "failures": failures,
         "skipped": skipped,
         "details": details,
     }
