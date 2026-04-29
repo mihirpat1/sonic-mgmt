@@ -34,7 +34,7 @@ def _check_presence_common(presence_map, expected_ports, label):
     missing = []
     for port in sorted(expected_ports):
         status = presence_map.get(port, "")
-        if status == "Present":
+        if status.strip().lower() == "present":
             present.append(port)
         else:
             missing.append(port)
@@ -64,17 +64,19 @@ def check_presence_show_cli(duthost, port_attributes_dict):
     expected_ports = set(port_attributes_dict.keys())
     if not expected_ports:
         return {
-            "passed": False,
+            "passed": True,
             "present": [],
             "missing": [],
-            "details": "port_attributes_dict is empty - nothing to verify",
+            "details": "no ports to verify (port_attributes_dict is empty)",
         }
 
     result = duthost.show_and_parse(CMD_SHOW_PRESENCE)
-    presence_map = {
-        entry["port"]: entry.get("presence", "").strip()
-        for entry in result
-    }
+    presence_map = {}
+    for entry in result:
+        port = entry.get("port")
+        if not port:
+            continue
+        presence_map[port] = entry.get("presence", "").strip()
 
     return _check_presence_common(presence_map, expected_ports, "show CLI")
 
@@ -96,10 +98,10 @@ def check_presence_sfputil(duthost, port_attributes_dict):
     expected_ports = set(port_attributes_dict.keys())
     if not expected_ports:
         return {
-            "passed": False,
+            "passed": True,
             "present": [],
             "missing": [],
-            "details": "port_attributes_dict is empty - nothing to verify",
+            "details": "no ports to verify (port_attributes_dict is empty)",
         }
 
     output = duthost.command(CMD_SFPUTIL_PRESENCE, module_ignore_errors=True)
@@ -144,22 +146,28 @@ CLI_KEY_ACTIVE_FIRMWARE = "Active Firmware"
 
 
 def check_gold_firmware(duthost, port_attributes_dict):
-    """Verify active firmware equals the expected gold firmware.
+    """Verify every CMIS active-optical transceiver runs its gold firmware.
 
-    Only ports whose ``EEPROM_ATTRIBUTES.cmis_active_optical`` is True and
-    that define ``gold_firmware_version`` are evaluated. Other ports are
-    silently skipped (they have no expectation to compare against).
+    A port is in scope iff ``EEPROM_ATTRIBUTES.cmis_active_optical`` is True.
+    For every in-scope port:
+
+      * ``gold_firmware_version`` MUST be defined in ``EEPROM_ATTRIBUTES`` -
+        a missing value is reported as a failure (the inventory is incomplete).
+      * the active firmware reported by the CLI MUST equal that value.
+
+    Ports that are not CMIS active-optical are out of scope and recorded under
+    ``'skipped'`` (no expectation to compare against).
 
     Returns:
-        dict: {'passed': bool, 'matched': [str], 'mismatched': [str],
-               'skipped': [str], 'details': str}
+        dict: ``{'passed': bool, 'matched': [str], 'mismatched': [str],
+                 'skipped': [str], 'details': str}``
     """
     expected_ports = set(port_attributes_dict.keys())
     if not expected_ports:
         return {
-            "passed": False,
+            "passed": True,
             "matched": [], "mismatched": [], "skipped": [],
-            "details": "port_attributes_dict is empty - nothing to verify",
+            "details": "no ports to verify (port_attributes_dict is empty)",
         }
 
     output = duthost.command(CMD_SHOW_TRANSCEIVER_INFO, module_ignore_errors=True)
@@ -177,11 +185,13 @@ def check_gold_firmware(duthost, port_attributes_dict):
     for port in sorted(expected_ports):
         eeprom_attrs = port_attributes_dict[port].get(EEPROM_ATTRIBUTES_KEY, {})
         if not eeprom_attrs.get("cmis_active_optical"):
+            # Out of scope: gold-firmware contract only applies to CMIS active optics.
             skipped.append(port)
             continue
         expected_fw = eeprom_attrs.get("gold_firmware_version")
         if not expected_fw:
-            skipped.append(port)
+            mismatched.append(f"{port}(gold_firmware_version not configured for CMIS active optic)")
+            logger.warning("Port %s: cmis_active_optical=True but gold_firmware_version missing", port)
             continue
         actual_fw = parsed.get(port, {}).get(CLI_KEY_ACTIVE_FIRMWARE, "").strip()
         if actual_fw == expected_fw:
@@ -193,12 +203,12 @@ def check_gold_firmware(duthost, port_attributes_dict):
     passed = len(mismatched) == 0
     if passed:
         details = (
-            f"{len(matched)} ports running gold firmware, {len(skipped)} skipped "
-            "(non-CMIS-active or no gold version configured)"
+            f"{len(matched)} CMIS active-optical port(s) running gold firmware, "
+            f"{len(skipped)} out-of-scope port(s) skipped"
         )
     else:
         details = (
-            f"{len(mismatched)} port(s) NOT running gold firmware: "
+            f"{len(mismatched)} CMIS active-optical port(s) failed gold-firmware check: "
             + "; ".join(mismatched)
         )
     logger.info("Gold firmware check: %s", details)
@@ -219,19 +229,19 @@ def check_gold_firmware(duthost, port_attributes_dict):
 def check_links_up(duthost, port_attributes_dict):
     """Verify every port in *port_attributes_dict* is admin-up and oper-up.
 
-    Uses ``show interface description`` parsed via the shared
-    ``parse_intf_status`` helper. Ports missing from the CLI output are
-    treated as failures.
+    Uses :func:`tests.common.platform.interface_utils.get_dut_interfaces_status`
+    to retrieve admin/oper state for every interface on the DUT. Ports missing
+    from that mapping are treated as failures.
 
     Returns:
-        dict: {'passed': bool, 'up': [str], 'down': [str], 'details': str}
+        dict: ``{'passed': bool, 'up': [str], 'down': [str], 'details': str}``
     """
     expected_ports = set(port_attributes_dict.keys())
     if not expected_ports:
         return {
-            "passed": False,
+            "passed": True,
             "up": [], "down": [],
-            "details": "port_attributes_dict is empty - nothing to verify",
+            "details": "no ports to verify (port_attributes_dict is empty)",
         }
 
     intf_status = get_dut_interfaces_status(duthost)

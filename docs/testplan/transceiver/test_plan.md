@@ -136,16 +136,14 @@ An autouse fixture in the top-level `conftest.py` runs before and after **every*
 - **Before**: record `xcvrd` PID and `/var/core/` baseline; on failure, take the configured pre-test action (default: skip the test).
 - **After**: verify `xcvrd` PID is unchanged and no new core files appeared; on failure, take the configured post-test action (default: abort the session via `pytest.exit`) so a regression surfaces cleanly.
 
-The action for each phase is configurable so an operator can keep a run going through health-check failures (e.g. when triaging on a known-degraded DUT). Both phases support the same three actions, with different defaults:
+The action for each phase is configurable so an operator can keep a run going through health-check failures (e.g. when triaging on a known-degraded DUT):
 
 | Phase     | Default action              | Action      | Effect                                                                              |
 | --------- | --------------------------- | ----------- | ----------------------------------------------------------------------------------- |
 | Pre-test  | `pytest.skip()`             | `skip`      | Skip the current test (default for pre-test).                                       |
 |           |                             | `warn`      | Log a warning and let the test run.                                                 |
-|           |                             | `fail`      | Call `pytest.fail` so this test fails but the session continues.                    |
 | Post-test | `pytest.exit(returncode=1)` | `exit`      | Abort the session on the first post-test failure (default for post-test).           |
-|           |                             | `warn`      | Log an error and let the run continue.                                              |
-|           |                             | `fail`      | Call `pytest.fail` so this test fails but the session continues.                    |
+|           |                             | `warn`      | Log a warning and let the run continue.                                             |
 
 **How to choose the action** (highest precedence first):
 

@@ -5,6 +5,7 @@ Used by the autouse function-scoped fixture in conftest.py to capture baselines
 before each test and verify system health after each test.
 """
 import logging
+from collections import namedtuple
 
 import pytest
 
@@ -18,15 +19,29 @@ DEFAULT_MONITORED_PROCESSES = {
     "xcvrd": "pmon",
 }
 
+# Shell snippet used by both capture_baseline and verify_health to list files
+# in /var/core/. Cannot be merged with the PID lookup because get_program_info
+# uses a separate `docker exec ... supervisorctl` call, but each snapshot is
+# now a single shell round-trip rather than several.
+_FIND_CORE_FILES_CMD = (
+    "find /var/core/ -maxdepth 1 -type f -printf '%f\n' 2>/dev/null || true"
+)
 
-class HealthBaseline:
-    """Snapshot of system health state captured before a test runs."""
 
-    __slots__ = ("pid_baselines", "core_files")
+HealthBaseline = namedtuple("HealthBaseline", ["pid_baselines", "core_files"])
+"""Snapshot of system health state captured before a test runs.
 
-    def __init__(self, pid_baselines, core_files):
-        self.pid_baselines = pid_baselines        # {process: (status, pid)}
-        self.core_files = core_files              # set of filenames
+Fields:
+    pid_baselines: dict ``{process: (status, pid)}``
+    core_files:    set of filenames currently in ``/var/core/``
+"""
+
+
+def _list_core_files(duthost):
+    """Return the current set of files in /var/core/ on the DUT."""
+    result = duthost.shell(_FIND_CORE_FILES_CMD, module_ignore_errors=True)
+    stdout = result.get("stdout", "")
+    return set(stdout.splitlines()) if stdout.strip() else set()
 
 
 def capture_baseline(duthost, monitored_processes=None):
@@ -34,8 +49,8 @@ def capture_baseline(duthost, monitored_processes=None):
 
     Args:
         duthost: DUT host handle.
-        monitored_processes: dict of {process_name: container_name}.
-            Defaults to DEFAULT_MONITORED_PROCESSES.
+        monitored_processes: dict of ``{process_name: container_name}``.
+            Defaults to ``DEFAULT_MONITORED_PROCESSES``.
 
     Returns:
         HealthBaseline
@@ -43,29 +58,16 @@ def capture_baseline(duthost, monitored_processes=None):
     if monitored_processes is None:
         monitored_processes = DEFAULT_MONITORED_PROCESSES
 
-    # 1. Record PID baselines
     pid_baselines = {}
     for process, container in monitored_processes.items():
         status, pid = get_program_info(duthost, container, process)
         pid_baselines[process] = (status, pid)
         logger.debug("Baseline PID - %s (%s): status=%s pid=%s", process, container, status, pid)
 
-    # 2. Record current core files
-    core_result = duthost.shell(
-        "find /var/core/ -maxdepth 1 -type f -printf '%f\n' 2>/dev/null || true",
-        module_ignore_errors=True,
-    )
-    core_files = (
-        set(core_result.get("stdout", "").splitlines())
-        if core_result.get("stdout", "").strip()
-        else set()
-    )
+    core_files = _list_core_files(duthost)
     logger.debug("Baseline core files: %d", len(core_files))
 
-    return HealthBaseline(
-        pid_baselines=pid_baselines,
-        core_files=core_files,
-    )
+    return HealthBaseline(pid_baselines=pid_baselines, core_files=core_files)
 
 
 def verify_health(duthost, baseline, monitored_processes=None, expect_pid_change=None):
@@ -74,12 +76,12 @@ def verify_health(duthost, baseline, monitored_processes=None, expect_pid_change
     Args:
         duthost: DUT host handle.
         baseline: HealthBaseline captured before the test.
-        monitored_processes: dict of {process_name: container_name}.
+        monitored_processes: dict of ``{process_name: container_name}``.
         expect_pid_change: set of process names where a PID change is expected
             (e.g., after an intentional service restart).
 
     Returns:
-        dict: {'passed': bool, 'failures': [str]}
+        dict: ``{'passed': bool, 'failures': [str]}``
     """
     if monitored_processes is None:
         monitored_processes = DEFAULT_MONITORED_PROCESSES
@@ -101,25 +103,13 @@ def verify_health(duthost, baseline, monitored_processes=None, expect_pid_change
             )
 
     # 2. Check for new core files
-    core_result = duthost.shell(
-        "find /var/core/ -maxdepth 1 -type f -printf '%f\n' 2>/dev/null || true",
-        module_ignore_errors=True,
-    )
-    current_cores = (
-        set(core_result.get("stdout", "").splitlines())
-        if core_result.get("stdout", "").strip()
-        else set()
-    )
-    new_cores = current_cores - baseline.core_files
+    new_cores = _list_core_files(duthost) - baseline.core_files
     if new_cores:
         failures.append(f"New core files detected: {', '.join(sorted(new_cores))}")
 
     passed = len(failures) == 0
-    if not passed:
-        logger.error("Health check failures: %s", "; ".join(failures))
-    else:
+    if passed:
         logger.info("Post-test health check passed")
-
     return {"passed": passed, "failures": failures}
 
 
@@ -127,13 +117,19 @@ def verify_health(duthost, baseline, monitored_processes=None, expect_pid_change
 #   (name: str, passed: bool, detail: str)
 
 # Valid failure actions per phase. The first entry in each tuple is the default.
-PRE_TEST_ACTIONS = ("skip", "warn", "fail")
-POST_TEST_ACTIONS = ("exit", "warn", "fail")
+PRE_TEST_ACTIONS = ("skip", "warn")
+POST_TEST_ACTIONS = ("exit", "warn")
 
 PRE_TEST_MARKER = "xcvr_pre_test_failure_action"
 POST_TEST_MARKER = "xcvr_post_test_failure_action"
 PRE_TEST_OPTION = "--xcvr_pre_test_failure_action"
 POST_TEST_OPTION = "--xcvr_post_test_failure_action"
+
+# Per-phase configuration consumed by _evaluate_phase.
+_PHASE_CONFIG = {
+    "pre-test": (PRE_TEST_MARKER, PRE_TEST_OPTION, PRE_TEST_ACTIONS, "Pre-test"),
+    "post-test": (POST_TEST_MARKER, POST_TEST_OPTION, POST_TEST_ACTIONS, "Post-test"),
+}
 
 
 def _resolve_action(request, marker_name, option_name, valid_actions):
@@ -154,6 +150,42 @@ def _resolve_action(request, marker_name, option_name, valid_actions):
     return request.config.getoption(option_name)
 
 
+def _evaluate_phase(request, checks, events, phase):
+    """Shared dispatcher for pre- and post-test health-check phases.
+
+    Aggregates failed *checks*, resolves the action via marker > CLI option,
+    appends a record to *events*, and invokes the matching pytest control flow.
+
+    Args:
+        request: pytest ``request`` fixture from the calling fixture.
+        checks: iterable of ``(name, passed, detail)`` tuples.
+        events: list to append failure events to (for terminal summary).
+        phase: ``"pre-test"`` or ``"post-test"``.
+    """
+    failures = [f"{name}: {detail}" for name, passed, detail in checks if not passed]
+    if not failures:
+        return
+    detail = "; ".join(failures)
+    marker, option, valid, label = _PHASE_CONFIG[phase]
+    action = _resolve_action(request, marker, option, valid)
+    events.append({
+        "test": request.node.nodeid,
+        "phase": phase,
+        "action": action,
+        "details": detail,
+    })
+    msg = f"{label} health check failed for {request.node.name} -- {detail}"
+    if action == "skip":
+        pytest.skip(msg)
+    elif action == "exit":
+        pytest.exit(
+            f"Aborting: environment unhealthy after {request.node.name} -- {detail}",
+            returncode=1,
+        )
+    else:  # warn
+        logger.warning("%s (action=warn, continuing)", msg)
+
+
 def run_pre_check(request, checks, events):
     """Evaluate pre-test checks; act on failures per resolved action.
 
@@ -163,31 +195,8 @@ def run_pre_check(request, checks, events):
     Actions:
         skip - call ``pytest.skip`` (default).
         warn - log a warning and let the test proceed.
-        fail - call ``pytest.fail`` (this test fails; session continues).
-
-    Args:
-        request: pytest ``request`` fixture from the calling fixture.
-        checks: iterable of ``(name, passed, detail)`` tuples.
-        events: list to append failure events to (for terminal summary).
     """
-    failures = [f"{name}: {detail}" for name, passed, detail in checks if not passed]
-    if not failures:
-        return
-    detail = "; ".join(failures)
-    action = _resolve_action(request, PRE_TEST_MARKER, PRE_TEST_OPTION, PRE_TEST_ACTIONS)
-    events.append({
-        "test": request.node.nodeid,
-        "phase": "pre-test",
-        "action": action,
-        "details": detail,
-    })
-    msg = f"Pre-test health check failed for {request.node.name} -- {detail}"
-    if action == "skip":
-        pytest.skip(msg)
-    elif action == "fail":
-        pytest.fail(msg)
-    else:  # warn
-        logger.warning("%s (action=warn, continuing)", msg)
+    _evaluate_phase(request, checks, events, "pre-test")
 
 
 def run_post_check(request, checks, events):
@@ -198,30 +207,6 @@ def run_post_check(request, checks, events):
 
     Actions:
         exit - call ``pytest.exit`` to abort the session (default).
-        warn - log an error and let the run continue.
-        fail - call ``pytest.fail`` (this test fails; session continues).
-
-    Args:
-        request: pytest ``request`` fixture from the calling fixture.
-        checks: iterable of ``(name, passed, detail)`` tuples.
-        events: list to append failure events to (for terminal summary).
+        warn - log a warning and let the run continue.
     """
-    failures = [f"{name}: {detail}" for name, passed, detail in checks if not passed]
-    if not failures:
-        return
-    detail = "; ".join(failures)
-    action = _resolve_action(request, POST_TEST_MARKER, POST_TEST_OPTION, POST_TEST_ACTIONS)
-    events.append({
-        "test": request.node.nodeid,
-        "phase": "post-test",
-        "action": action,
-        "details": detail,
-    })
-    msg = f"Post-test health check failed for {request.node.name} -- {detail}"
-    if action == "exit":
-        pytest.exit(f"Aborting: environment unhealthy after {request.node.name} -- {detail}",
-                    returncode=1)
-    elif action == "fail":
-        pytest.fail(msg)
-    else:  # warn
-        logger.warning("%s (action=warn, continuing)", msg)
+    _evaluate_phase(request, checks, events, "post-test")

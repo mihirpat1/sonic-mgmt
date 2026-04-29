@@ -9,10 +9,6 @@ from tests.transceiver.common.prerequisites import (
 
 logger = logging.getLogger(__name__)
 
-pytestmark = [
-    pytest.mark.topology("ptp"),
-]
-
 
 # ──────────────────────────────────────────────────────────────────────
 # Transceiver presence verification via sfputil
@@ -24,9 +20,6 @@ def test_transceiver_presence_sfputil(duthost, port_attributes_dict):
 
     Uses ``sfputil show presence`` and validates every expected port.
     """
-    if duthost.facts.get("asic_type") == "vs":
-        pytest.skip("Skipping presence check on virtual switch testbed")
-
     result = check_presence_sfputil(duthost, port_attributes_dict)
 
     if not result["passed"]:
@@ -46,9 +39,6 @@ def test_transceiver_presence_show_cli(duthost, port_attributes_dict):
     Uses ``show interface transceiver presence`` and validates every
     expected port.
     """
-    if duthost.facts.get("asic_type") == "vs":
-        pytest.skip("Skipping presence check on virtual switch testbed")
-
     result = check_presence_show_cli(duthost, port_attributes_dict)
 
     if not result["passed"]:

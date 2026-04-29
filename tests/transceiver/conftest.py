@@ -35,10 +35,6 @@ from tests.transceiver.common.health_checks import (
     verify_health,
 )
 
-pytestmark = [
-    pytest.mark.topology('ptp')
-]
-
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = get_repo_root()
@@ -46,24 +42,19 @@ REPO_ROOT = get_repo_root()
 # Session-wide health-check event log, consumed by pytest_terminal_summary.
 # Category conftest files import this list and pass it to
 # run_pre_check / run_post_check so all events accumulate in one place.
+# Module-level mutable list is safe because pytest instantiates this conftest
+# module once per session.
 health_check_events = []
 
-# Cached at module import; used by pytest_collection_modifyitems to scope
-# the skip_check_dut_health marker to items under tests/transceiver/.
+# Cached at module import to avoid a per-item filesystem resolve in
+# pytest_collection_modifyitems.
 _TRANSCEIVER_ROOT = Path(__file__).resolve().parent
+_TRANSCEIVER_ROOT_PREFIX = os.path.join(str(_TRANSCEIVER_ROOT), "")
 
 
 def _is_under_transceiver_root(item_path):
-    """Return True iff *item_path* is inside this conftest's directory.
-
-    Implemented with try/except on Path.relative_to to remain compatible
-    with Python < 3.9 (Path.is_relative_to was added in 3.9).
-    """
-    try:
-        Path(str(item_path)).resolve().relative_to(_TRANSCEIVER_ROOT)
-    except ValueError:
-        return False
-    return True
+    """Return True iff *item_path* is inside this conftest's directory."""
+    return str(item_path).startswith(_TRANSCEIVER_ROOT_PREFIX)
 
 
 def pytest_addoption(parser):
@@ -75,17 +66,15 @@ def pytest_addoption(parser):
     parser.addoption(
         "--xcvr_pre_test_failure_action",
         action="store", default=PRE_TEST_ACTIONS[0], choices=list(PRE_TEST_ACTIONS),
-        help=("Default action when the per-test pre-check fails. "
-              "'skip' (default) skips the test; 'warn' logs and continues; "
-              "'fail' marks the test failed but keeps the session running. "
+        help=("Action when the per-test pre-check fails. "
+              "'skip' (default) skips the test; 'warn' logs and lets the test run. "
               "Override per test with @pytest.mark.xcvr_pre_test_failure_action(<action>).")
     )
     parser.addoption(
         "--xcvr_post_test_failure_action",
         action="store", default=POST_TEST_ACTIONS[0], choices=list(POST_TEST_ACTIONS),
-        help=("Default action when the per-test post-check fails. "
-              "'exit' (default) aborts the session; 'warn' logs and continues; "
-              "'fail' marks the test failed but keeps the session running. "
+        help=("Action when the per-test post-check fails. "
+              "'exit' (default) aborts the session; 'warn' logs and lets the run continue. "
               "Override per test with @pytest.mark.xcvr_post_test_failure_action(<action>).")
     )
 
@@ -105,28 +94,37 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(config, items):
-    """Apply skip_check_dut_health to every transceiver test.
+    """Tag every transceiver test with shared markers.
 
-    The transceiver suite has its own per-test health check fixture
-    (_per_test_health_check) that monitors core dumps and PIDs at finer
-    granularity, so the global module-scoped core_dump_and_config_check
-    fixture in tests/conftest.py is redundant.
+    Adds two markers to every collected item under ``tests/transceiver/``
+    (and to its parent ``Module``):
 
-    Note: pytest_collection_modifyitems receives ALL items in the session,
-    not just those under this conftest, so we filter by path. The parent
-    Module is tagged in addition to each item, because
-    core_dump_and_config_check is module-scoped and inspects markers via
-    request.node (the Module) which does not see item-level markers.
+    * ``topology("ptp")`` – the transceiver suite only runs on PTP testbeds;
+      applying it here saves every test module from declaring ``pytestmark``.
+    * ``skip_check_dut_health`` – the suite has its own per-test health check
+      fixture (``_per_test_health_check``) that monitors core dumps and PIDs
+      at finer granularity, so the global module-scoped
+      ``core_dump_and_config_check`` fixture in ``tests/conftest.py`` is
+      redundant.
+
+    ``pytest_collection_modifyitems`` receives ALL items in the session, not
+    just those under this conftest, so we filter by path. The parent
+    ``Module`` is tagged in addition to each item because
+    ``core_dump_and_config_check`` is module-scoped and inspects markers via
+    ``request.node`` (the Module), which does not see item-level markers.
     """
     skip_marker = pytest.mark.skip_check_dut_health
+    topology_marker = pytest.mark.topology("ptp")
     tagged_modules = set()
     for item in items:
         if not _is_under_transceiver_root(item.fspath):
             continue
         item.add_marker(skip_marker)
+        item.add_marker(topology_marker)
         module = item.getparent(pytest.Module)
         if module is not None and module.nodeid not in tagged_modules:
             module.add_marker(skip_marker)
+            module.add_marker(topology_marker)
             tagged_modules.add(module.nodeid)
 
 
@@ -243,6 +241,21 @@ def _ensure_transceiver_infra_initialized(port_attributes_dict):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Session-wide guard: skip the entire transceiver suite on virtual switch
+# testbeds. VS DUTs lack physical optics, ``xcvrd`` does not run, and the
+# per-test health check would otherwise mass-skip every test with a
+# misleading message about a missing process.
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _skip_transceiver_suite_on_vs(duthost):
+    """Skip every transceiver test when the DUT is a virtual switch."""
+    if duthost.facts.get("asic_type") == "vs":
+        pytest.skip("Transceiver tests are not supported on virtual switch testbed")
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Session-scoped prerequisite fixtures (gates).
 # These are session-scoped (computed once per session) but NOT autouse —
 # a category opts in by requesting the fixture from its own conftest.py
@@ -269,7 +282,12 @@ def presence_verified(duthost, port_attributes_dict):
 
 @pytest.fixture(scope="session")
 def gold_fw_verified(duthost, port_attributes_dict):
-    """Gate: every non-DAC CMIS transceiver runs its expected gold firmware.
+    """Gate: every CMIS active-optical transceiver runs its gold firmware.
+
+    A port is in scope iff its ``EEPROM_ATTRIBUTES.cmis_active_optical`` is
+    True; for those ports ``gold_firmware_version`` MUST be configured AND
+    must match the active firmware reported by the CLI. Other ports are
+    out of scope (no expectation to compare against).
 
     Opted into by DOM, System (via their category conftests). CDB FW does
     NOT opt in — it owns the gold-firmware test case directly.
@@ -316,7 +334,7 @@ def _per_test_health_check(request, duthost):
     ]
     run_pre_check(request, pre_checks, health_check_events)
 
-    yield baseline
+    yield
 
     result = verify_health(duthost, baseline)
     post_checks = [

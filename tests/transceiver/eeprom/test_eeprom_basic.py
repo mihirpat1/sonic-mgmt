@@ -35,9 +35,6 @@ def test_eeprom_content_verification_via_show_cli(duthost, port_attributes_dict)
     Runs one CLI command, parses output per port, and validates expected EEPROM fields
     against attributes from port_attributes_dict. Aggregates all failures for reporting.
     """
-    if duthost.facts.get("asic_type") == "vs":
-        pytest.skip("Skipping EEPROM verification on virtual switch testbed")
-
     all_failures = []
 
     result = duthost.command(CMD_SFP_EEPROM, module_ignore_errors=True)
