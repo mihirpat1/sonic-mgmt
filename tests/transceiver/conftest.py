@@ -27,6 +27,8 @@ from tests.transceiver.common.prerequisites import (
     check_presence_show_cli,
 )
 from tests.transceiver.common.health_checks import (
+    POST_TEST_ACTIONS,
+    PRE_TEST_ACTIONS,
     capture_baseline,
     run_post_check,
     run_pre_check,
@@ -69,6 +71,36 @@ def pytest_addoption(parser):
     parser.addoption(
         "--skip_transceiver_template_validation", action="store_true", default=False,
         help="Skip template validation even if deployment templates file exists"
+    )
+    parser.addoption(
+        "--xcvr_pre_test_failure_action",
+        action="store", default=PRE_TEST_ACTIONS[0], choices=list(PRE_TEST_ACTIONS),
+        help=("Default action when the per-test pre-check fails. "
+              "'skip' (default) skips the test; 'warn' logs and continues; "
+              "'fail' marks the test failed but keeps the session running. "
+              "Override per test with @pytest.mark.xcvr_pre_test_failure_action(<action>).")
+    )
+    parser.addoption(
+        "--xcvr_post_test_failure_action",
+        action="store", default=POST_TEST_ACTIONS[0], choices=list(POST_TEST_ACTIONS),
+        help=("Default action when the per-test post-check fails. "
+              "'exit' (default) aborts the session; 'warn' logs and continues; "
+              "'fail' marks the test failed but keeps the session running. "
+              "Override per test with @pytest.mark.xcvr_post_test_failure_action(<action>).")
+    )
+
+
+def pytest_configure(config):
+    """Register transceiver-specific markers."""
+    config.addinivalue_line(
+        "markers",
+        "xcvr_pre_test_failure_action(action): override action on pre-test health check "
+        "failure for this test. Valid values: " + ", ".join(PRE_TEST_ACTIONS) + ".",
+    )
+    config.addinivalue_line(
+        "markers",
+        "xcvr_post_test_failure_action(action): override action on post-test health check "
+        "failure for this test. Valid values: " + ", ".join(POST_TEST_ACTIONS) + ".",
     )
 
 
@@ -299,8 +331,10 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         return
     terminalreporter.section("Health Check Summary")
     for event in health_check_events:
+        action = event.get("action", "")
+        action_str = f" action={action}" if action else ""
         terminalreporter.write_line(
-            f"  [{event['phase']}] {event['test']}: {event['details']}"
+            f"  [{event['phase']}{action_str}] {event['test']}: {event['details']}"
         )
 
 

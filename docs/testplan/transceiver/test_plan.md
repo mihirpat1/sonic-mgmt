@@ -115,30 +115,45 @@ Each gate is a session-scoped pytest fixture defined in [`tests/transceiver/conf
 
 **Opt-in by category**
 
-| Category | `presence_verified` | `gold_fw_verified` | `links_verified` |
-|----------|:-------------------:|:------------------:|:----------------:|
-| EEPROM       | — own reportable test | — own reportable test | ✅ |
-| DOM          | ✅ | ✅ | ✅ |
-| System       | ✅ | ✅ | ✅ |
-| CDB FW       | ✅ | — own reportable test | ✅ |
-| Port Config  | — CONFIG_DB only | — CONFIG_DB only | — CONFIG_DB only |
-| Physical OIR / Remote Reseat | ✅ | ✅ | ✅ (verified pre-test only) |
+| Category (attribute file) | `presence_verified` | `gold_fw_verified` | `links_verified` |
+|---------------------------|:-------------------:|:------------------:|:----------------:|
+| EEPROM (`eeprom.json`)                  | — own reportable test         | — N/A (EEPROM reads independent of FW version) | ✅ |
+| System (`system.json`)                  | ✅                            | ✅                                              | ✅ |
+| Physical OIR (`physical_oir.json`)      | ✅                            | ✅                                              | ✅ (verified pre-test only) |
+| Remote Reseat (`remote_reseat.json`)    | ✅                            | ✅                                              | ✅ (verified pre-test only) |
+| CDB FW Upgrade (`cdb_fw_upgrade.json`)  | ✅                            | — own reportable test                           | ✅ |
+| DOM (`dom.json`)                        | ✅                            | ✅                                              | ✅ |
+| VDM (`vdm.json`)                        | ✅                            | ✅                                              | ✅ |
+| PM (`pm.json`)                          | ✅                            | ✅                                              | ✅ |
+| Port Config (`port_config.json`)        | — CONFIG_DB only              | — CONFIG_DB only                                | — CONFIG_DB only |
 
-A "—" entry means the category intentionally does not consume that gate; the trailing note explains why. EEPROM and CDB FW skip the gates whose semantics they own as reportable tests (so a gold-FW mismatch surfaces as a CDB FW test failure, not a session-wide skip).
+A "—" entry means the category intentionally does not consume that gate; the trailing note explains why. EEPROM and CDB FW Upgrade skip the gates whose semantics they own as reportable tests (so a gold-FW mismatch surfaces as a CDB FW Upgrade test failure, not a session-wide skip). Physical OIR and Remote Reseat verify links once before the test starts but intentionally tolerate link-down windows during the test itself.
 
 #### Common Per-Test Health Checks
 
 An autouse fixture in the top-level `conftest.py` runs before and after **every** transceiver test:
 
-- **Before**: record `xcvrd` PID and `/var/core/` baseline; **skip** the test if `xcvrd` is not running.
-- **After**: verify `xcvrd` PID is unchanged and no new core files appeared; on failure, **abort the session** (`pytest.exit`) to avoid running further tests against a degraded DUT.
+- **Before**: record `xcvrd` PID and `/var/core/` baseline; on failure, take the configured pre-test action (default: skip the test).
+- **After**: verify `xcvrd` PID is unchanged and no new core files appeared; on failure, take the configured post-test action (default: abort the session via `pytest.exit`) so a regression surfaces cleanly.
 
-| Phase     | Action on failure           | Effect on the run                                                                |
-| --------- | --------------------------- | -------------------------------------------------------------------------------- |
-| Pre-test  | `pytest.skip()`             | Current test is skipped; remaining tests continue.                               |
-| Post-test | `pytest.exit(returncode=1)` | Session aborts on the first post-test failure to surface the regression cleanly. |
+The action for each phase is configurable so an operator can keep a run going through health-check failures (e.g. when triaging on a known-degraded DUT). Both phases support the same three actions, with different defaults:
 
-Both phases append to a shared `health_check_events` list; a `pytest_terminal_summary` hook prints a consolidated `Health Check Summary` section at the end of the run.
+| Phase     | Default action              | Action      | Effect                                                                              |
+| --------- | --------------------------- | ----------- | ----------------------------------------------------------------------------------- |
+| Pre-test  | `pytest.skip()`             | `skip`      | Skip the current test (default for pre-test).                                       |
+|           |                             | `warn`      | Log a warning and let the test run.                                                 |
+|           |                             | `fail`      | Call `pytest.fail` so this test fails but the session continues.                    |
+| Post-test | `pytest.exit(returncode=1)` | `exit`      | Abort the session on the first post-test failure (default for post-test).           |
+|           |                             | `warn`      | Log an error and let the run continue.                                              |
+|           |                             | `fail`      | Call `pytest.fail` so this test fails but the session continues.                    |
+
+**How to choose the action** (highest precedence first):
+
+1. Per-test marker: `@pytest.mark.xcvr_pre_test_failure_action(<action>)` / `@pytest.mark.xcvr_post_test_failure_action(<action>)`
+2. CLI option: `--xcvr_pre_test_failure_action <action>` / `--xcvr_post_test_failure_action <action>`
+3. Built-in default from the table above.
+
+Every failure is appended to the shared `health_check_events` list and printed in a `Health Check Summary` section at the end of the run, regardless of the action taken.
 
 The transceiver `conftest.py` also tags every collected item (and its parent `Module`) with `pytest.mark.skip_check_dut_health` to suppress the repo-wide module-scoped `core_dump_and_config_check` fixture, which would otherwise duplicate the per-test work above.
 

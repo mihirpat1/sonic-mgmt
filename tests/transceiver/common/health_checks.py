@@ -126,9 +126,44 @@ def verify_health(duthost, baseline, monitored_processes=None, expect_pid_change
 # A "check" passed to run_pre_check / run_post_check is a 3-tuple:
 #   (name: str, passed: bool, detail: str)
 
+# Valid failure actions per phase. The first entry in each tuple is the default.
+PRE_TEST_ACTIONS = ("skip", "warn", "fail")
+POST_TEST_ACTIONS = ("exit", "warn", "fail")
+
+PRE_TEST_MARKER = "xcvr_pre_test_failure_action"
+POST_TEST_MARKER = "xcvr_post_test_failure_action"
+PRE_TEST_OPTION = "--xcvr_pre_test_failure_action"
+POST_TEST_OPTION = "--xcvr_post_test_failure_action"
+
+
+def _resolve_action(request, marker_name, option_name, valid_actions):
+    """Resolve the failure action for the current test.
+
+    Per-test marker (if present and valid) takes precedence over the CLI option,
+    which is always present and validated by argparse ``choices=`` at parse time.
+    """
+    marker = request.node.get_closest_marker(marker_name)
+    if marker is not None and marker.args:
+        action = str(marker.args[0]).lower()
+        if action in valid_actions:
+            return action
+        logger.warning(
+            "Ignoring invalid %s marker value %r; valid: %s",
+            marker_name, marker.args[0], valid_actions,
+        )
+    return request.config.getoption(option_name)
+
 
 def run_pre_check(request, checks, events):
-    """Evaluate pre-test checks; skip the test if any failed.
+    """Evaluate pre-test checks; act on failures per resolved action.
+
+    Action resolution order: per-test marker ``xcvr_pre_test_failure_action`` >
+    CLI option ``--xcvr_pre_test_failure_action`` > default ``skip``.
+
+    Actions:
+        skip - call ``pytest.skip`` (default).
+        warn - log a warning and let the test proceed.
+        fail - call ``pytest.fail`` (this test fails; session continues).
 
     Args:
         request: pytest ``request`` fixture from the calling fixture.
@@ -139,16 +174,32 @@ def run_pre_check(request, checks, events):
     if not failures:
         return
     detail = "; ".join(failures)
+    action = _resolve_action(request, PRE_TEST_MARKER, PRE_TEST_OPTION, PRE_TEST_ACTIONS)
     events.append({
         "test": request.node.nodeid,
         "phase": "pre-test",
+        "action": action,
         "details": detail,
     })
-    pytest.skip(f"Pre-test health check: {request.node.name} skipped -- {detail}")
+    msg = f"Pre-test health check failed for {request.node.name} -- {detail}"
+    if action == "skip":
+        pytest.skip(msg)
+    elif action == "fail":
+        pytest.fail(msg)
+    else:  # warn
+        logger.warning("%s (action=warn, continuing)", msg)
 
 
 def run_post_check(request, checks, events):
-    """Evaluate post-test checks; log + abort the session if any failed.
+    """Evaluate post-test checks; act on failures per resolved action.
+
+    Action resolution order: per-test marker ``xcvr_post_test_failure_action`` >
+    CLI option ``--xcvr_post_test_failure_action`` > default ``exit``.
+
+    Actions:
+        exit - call ``pytest.exit`` to abort the session (default).
+        warn - log an error and let the run continue.
+        fail - call ``pytest.fail`` (this test fails; session continues).
 
     Args:
         request: pytest ``request`` fixture from the calling fixture.
@@ -159,13 +210,18 @@ def run_post_check(request, checks, events):
     if not failures:
         return
     detail = "; ".join(failures)
-    logger.error("Post-test health anomaly for %s: %s", request.node.name, detail)
+    action = _resolve_action(request, POST_TEST_MARKER, POST_TEST_OPTION, POST_TEST_ACTIONS)
     events.append({
         "test": request.node.nodeid,
         "phase": "post-test",
+        "action": action,
         "details": detail,
     })
-    pytest.exit(
-        f"Aborting: environment unhealthy after {request.node.name} -- {detail}",
-        returncode=1,
-    )
+    msg = f"Post-test health check failed for {request.node.name} -- {detail}"
+    if action == "exit":
+        pytest.exit(f"Aborting: environment unhealthy after {request.node.name} -- {detail}",
+                    returncode=1)
+    elif action == "fail":
+        pytest.fail(msg)
+    else:  # warn
+        logger.warning("%s (action=warn, continuing)", msg)
