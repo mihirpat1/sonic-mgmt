@@ -79,6 +79,13 @@ def pytest_addoption(parser):
 
 def pytest_configure(config):
     """Register transceiver-specific markers."""
+    # Re-register here because pytest discovers pyproject.toml at the repo
+    # root as its configfile, which shadows tests/pytest.ini where this
+    # marker is otherwise defined.
+    config.addinivalue_line(
+        "markers",
+        "skip_check_dut_health: skip default execution of check_dut_health_status fixture",
+    )
     config.addinivalue_line(
         "markers",
         "xcvr_pre_test_failure_action(action): override action on pre-test health check "
